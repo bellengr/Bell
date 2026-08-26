@@ -81,6 +81,93 @@ def init_database():
         print(f"❌ Ошибка инициализации БД: {e}")
     sys.stdout.flush()
 
+def load_queue_from_db():
+    """Загрузка очереди из базы данных"""
+    global queue
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT link, user_id, timestamp FROM queue ORDER BY id DESC LIMIT ?', (MAX_QUEUE_SIZE,))
+        rows = cursor.fetchall()
+        
+        with queue_lock:
+            queue = []
+            for row in reversed(rows):
+                queue.append({
+                    'link': row[0],
+                    'user_id': row[1],
+                    'timestamp': datetime.fromisoformat(row[2])
+                })
+        
+        conn.close()
+        print(f"📂 Загружено {len(queue)} ссылок из очереди")
+    except Exception as e:
+        print(f"⚠️ Ошибка загрузки очереди: {e}")
+    sys.stdout.flush()
+
+def save_queue_to_db():
+    """Сохранение очереди в базу данных"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM queue')
+        
+        with queue_lock:
+            for item in queue:
+                cursor.execute(
+                    'INSERT INTO queue (link, user_id, timestamp) VALUES (?, ?, ?)',
+                    (item['link'], item['user_id'], item['timestamp'].isoformat())
+                )
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ Ошибка сохранения очереди: {e}")
+
+def load_vip_links():
+    """Загрузка VIP-ссылок из базы данных"""
+    global vip_links
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT link, added_by, expires_at FROM vip_links WHERE expires_at > ?', 
+                      (datetime.now().isoformat(),))
+        rows = cursor.fetchall()
+        
+        with vip_links_lock:
+            vip_links = []
+            for row in rows:
+                vip_links.append({
+                    'link': row[0],
+                    'added_by': row[1],
+                    'expires_at': datetime.fromisoformat(row[2])
+                })
+        
+        conn.close()
+        print(f"📂 Загружено {len(vip_links)} VIP-ссылок")
+    except Exception as e:
+        print(f"⚠️ Ошибка загрузки VIP-ссылок: {e}")
+    sys.stdout.flush()
+
+def save_vip_links():
+    """Сохранение VIP-ссылок в базу данных"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM vip_links')
+        
+        with vip_links_lock:
+            for item in vip_links:
+                cursor.execute(
+                    'INSERT INTO vip_links (link, added_by, expires_at) VALUES (?, ?, ?)',
+                    (item['link'], item['added_by'], item['expires_at'].isoformat())
+                )
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ Ошибка сохранения VIP-ссылок: {e}")
+
 def rate_limit():
     """Ограничение частоты запросов к API"""
     time.sleep(RATE_LIMIT_DELAY)
@@ -520,16 +607,13 @@ def process_message(event):
         # Получаем ID сообщения
         message_id = message.get('conversation_message_id', message.get('id', 0))
         
-        print(f"📍 ID сообщения: {message_id}")
-        print(f"📍 conversation_message_id: {message.get('conversation_message_id', 'нет')}")
-        print(f"📍 id: {message.get('id', 'нет')}")
-        
     except (AttributeError, KeyError) as e:
         print(f"⚠️ Ошибка чтения сообщения: {e}")
         return
     
     print(f"👤 От: {user_id}")
     print(f"💬 Текст: {text[:50]}..." if text else "💬 Текст: (пусто)")
+    print(f"📍 ID сообщения: {message_id}")
     print(f"💬 Беседа: {peer_id}")
     sys.stdout.flush()
     
