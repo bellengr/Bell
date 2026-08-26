@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import threading
 import traceback
 from typing import Optional, List, Tuple
-from flask import Flask, request, Response
+from flask import Flask, request, make_response
 
 print("=" * 60)
 print("🚀 БОТ ЗАПУСКАЕТСЯ (Callback API)...")
@@ -361,12 +361,24 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int):
 @app.route('/', methods=['POST'])
 def callback():
     try:
-        data = request.json
+        data = request.get_json(silent=True)
+        
+        if data is None:
+            # Если не JSON, читаем сырые данные
+            raw_data = request.get_data(as_text=True)
+            print(f"📥 Получены сырые данные: {raw_data}", flush=True)
+            return 'ok'
+        
         print(f"📥 Получен запрос: {data.get('type', 'unknown')}", flush=True)
         
         if data.get('type') == 'confirmation':
-            print(f"🔑 Возвращаю: {CONFIRMATION_CODE}", flush=True)
-            return CONFIRMATION_CODE
+            print(f"🔑 Возвращаю код: {CONFIRMATION_CODE}", flush=True)
+            
+            # Создаем ответ с чистой строкой
+            response = make_response(CONFIRMATION_CODE)
+            response.headers['Content-Type'] = 'text/plain; charset=utf-8'
+            response.headers['Content-Length'] = str(len(CONFIRMATION_CODE))
+            return response
         
         if data.get('type') == 'message_new':
             message = data.get('object', {}).get('message', {})
@@ -399,5 +411,5 @@ if __name__ == "__main__":
     print("=" * 60)
     sys.stdout.flush()
     
-    # ВАЖНО: Порт 3000!
+    # Порт 3000
     app.run(host='0.0.0.0', port=3000, debug=False)
