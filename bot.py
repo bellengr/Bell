@@ -364,10 +364,9 @@ def callback():
         data = request.json
         print(f"📥 Получен запрос: {data.get('type', 'unknown')}", flush=True)
         
-        # ВАЖНО: Для подтверждения возвращаем ТОЛЬКО строку
         if data.get('type') == 'confirmation':
             print(f"🔑 Возвращаю: {CONFIRMATION_CODE}", flush=True)
-            return CONFIRMATION_CODE  # Просто строка, без Response!
+            return CONFIRMATION_CODE
         
         if data.get('type') == 'message_new':
             message = data.get('object', {}).get('message', {})
@@ -400,5 +399,5 @@ if __name__ == "__main__":
     print("=" * 60)
     sys.stdout.flush()
     
-    # Порт 80!
-    app.run(host='0.0.0.0', port=80, debug=False)
+    # ВАЖНО: Порт 3000!
+    app.run(host='0.0.0.0', port=3000, debug=False)
