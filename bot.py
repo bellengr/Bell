@@ -23,9 +23,9 @@ except ImportError as e:
     raise
 
 # ====================== НАСТРОЙКИ ======================
-TOKEN = "vk1.a.s5mgEVHWOVgpTPQ2AhN4hYF15Tc6vsHIsmavsZNDFTZkvKB-mwOR-f1aUuQ27AWpc5wfZLZH42iJy74xZDafcBZJwzmupX8OUN8MnlDxZYuHLk5NrJHDwIUuFiDy6S8OTbl0trJEUg77amTmVsgZPypu-EkumFvDiQFIkMt3twuGQD2PpnckpaASfFXLw0HMxp3CbBTZsLy1DEilvoJRbA"  # ← ЗАМЕНИТЕ
-GROUP_ID = 241064421  # ← ВАШ ID ГРУППЫ
-CONFIRMATION_CODE = "134086a7"  # ← ЗАМЕНИТЕ НА КОД ИЗ VK
+TOKEN = "vk1.a.s5mgEVHWOVgpTPQ2AhN4hYF15Tc6vsHIsmavsZNDFTZkvKB-mwOR-f1aUuQ27AWpc5wfZLZH42iJy74xZDafcBZJwzmupX8OUN8MnlDxZYuHLk5NrJHDwIUuFiDy6S8OTbl0trJEUg77amTmVsgZPypu-EkumFvDiQFIkMt3twuGQD2PpnckpaASfFXLw0HMxp3CbBTZsLy1DEilvoJRbA"
+GROUP_ID = 241064421
+CONFIRMATION_CODE = "134086a7"
 # ======================================================
 
 MAX_QUEUE_SIZE = 10
@@ -245,7 +245,6 @@ def send_message(peer_id: int, text: str) -> Optional[int]:
         
         print(f"✅ Отправлено: {text[:50]}... ID: {result}")
         
-        # Если получили ID, планируем удаление
         if result and result > 0:
             schedule_delete(peer_id, result, 40)
         
@@ -361,18 +360,14 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int):
 
 @app.route('/', methods=['POST'])
 def callback():
-    """Обработка Callback API"""
     try:
         data = request.json
-        print(f"📥 Получен запрос: {data.get('type', 'unknown')}")
+        print(f"📥 Получен запрос: {data.get('type', 'unknown')}", flush=True)
         
-        # ВАЖНО: Для подтверждения возвращаем ТОЛЬКО код
         if data.get('type') == 'confirmation':
-            print(f"🔑 Запрос на подтверждение")
-            # Возвращаем код как plain text
+            print(f"🔑 Возвращаю код: {CONFIRMATION_CODE}", flush=True)
             return Response(CONFIRMATION_CODE, mimetype='text/plain')
         
-        # Для новых сообщений
         if data.get('type') == 'message_new':
             message = data.get('object', {}).get('message', {})
             
@@ -381,8 +376,6 @@ def callback():
             text = message.get('text', '')
             message_id = message.get('conversation_message_id', message.get('id', 0))
             
-            print(f"📨 Новое сообщение от {user_id}")
-            
             thread = threading.Thread(
                 target=process_message,
                 args=(peer_id, user_id, text, message_id),
@@ -390,10 +383,9 @@ def callback():
             )
             thread.start()
         
-        # Для всех остальных запросов возвращаем "ok"
         return 'ok'
     except Exception as e:
-        print(f"❌ Ошибка Callback: {e}")
+        print(f"❌ Ошибка Callback: {e}", flush=True)
         return 'ok'
 
 if __name__ == "__main__":
@@ -403,7 +395,9 @@ if __name__ == "__main__":
     print("=" * 60)
     print("🚀 Бот запущен с Callback API")
     print(f"📌 ID группы: {GROUP_ID}")
-    print(f"🔑 Код подтверждения: {CONFIRMATION_CODE[:5]}...")
+    print(f"🔑 Код подтверждения: {CONFIRMATION_CODE}")
     print("=" * 60)
+    sys.stdout.flush()
     
-    app.run(host='0.0.0.0', port=8080)
+    # ВАЖНО: Порт 80!
+    app.run(host='0.0.0.0', port=80, debug=False)
