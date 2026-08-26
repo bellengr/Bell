@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import threading
 import traceback
 from typing import Optional, List, Tuple
-from flask import Flask, request, jsonify
+from flask import Flask, request, Response
 
 print("=" * 60)
 print("🚀 БОТ ЗАПУСКАЕТСЯ (Callback API)...")
@@ -23,9 +23,9 @@ except ImportError as e:
     raise
 
 # ====================== НАСТРОЙКИ ======================
-TOKEN = "vk1.a.s5mgEVHWOVgpTPQ2AhN4hYF15Tc6vsHIsmavsZNDFTZkvKB-mwOR-f1aUuQ27AWpc5wfZLZH42iJy74xZDafcBZJwzmupX8OUN8MnlDxZYuHLk5NrJHDwIUuFiDy6S8OTbl0trJEUg77amTmVsgZPypu-EkumFvDiQFIkMt3twuGQD2PpnckpaASfFXLw0HMxp3CbBTZsLy1DEilvoJRbA"  # ← 1. ЗАМЕНИТЕ НА ВАШ ТОКЕН
-GROUP_ID = 241064421  # ← 2. ВАШ ID ГРУППЫ
-CONFIRMATION_CODE = "e52df98c"  # ← 3. ЗАМЕНИТЕ НА КОД ИЗ VK
+TOKEN = "vk1.a.s5mgEVHWOVgpTPQ2AhN4hYF15Tc6vsHIsmavsZNDFTZkvKB-mwOR-f1aUuQ27AWpc5wfZLZH42iJy74xZDafcBZJwzmupX8OUN8MnlDxZYuHLk5NrJHDwIUuFiDy6S8OTbl0trJEUg77amTmVsgZPypu-EkumFvDiQFIkMt3twuGQD2PpnckpaASfFXLw0HMxp3CbBTZsLy1DEilvoJRbA"  # ← ЗАМЕНИТЕ
+GROUP_ID = 241064421  # ← ВАШ ID ГРУППЫ
+CONFIRMATION_CODE = "e52df98c"  # ← ЗАМЕНИТЕ НА КОД ИЗ VK
 # ======================================================
 
 MAX_QUEUE_SIZE = 10
@@ -235,7 +235,6 @@ def can_user_post(user_id: int) -> bool:
         return posts_after >= 5
 
 def send_message(peer_id: int, text: str) -> Optional[int]:
-    """Отправка сообщения и планирование удаления"""
     try:
         rate_limit()
         result = vk.messages.send(
@@ -246,7 +245,7 @@ def send_message(peer_id: int, text: str) -> Optional[int]:
         
         print(f"✅ Отправлено: {text[:50]}... ID: {result}")
         
-        # Если получили ID сообщения, планируем удаление
+        # Если получили ID, планируем удаление
         if result and result > 0:
             schedule_delete(peer_id, result, 40)
         
@@ -256,7 +255,6 @@ def send_message(peer_id: int, text: str) -> Optional[int]:
         return None
 
 def schedule_delete(peer_id: int, message_id: int, delay: int):
-    """Планирование удаления сообщения бота"""
     def delete_after_delay():
         time.sleep(delay)
         try:
@@ -305,7 +303,6 @@ def delete_message(peer_id: int, message_id: int) -> bool:
         return False
 
 def process_message(peer_id: int, user_id: int, text: str, message_id: int):
-    """Обработка входящего сообщения"""
     global queue
     
     print(f"\n📩 Сообщение от {user_id}: {text[:50] if text else '(пусто)'}")
@@ -328,7 +325,6 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int):
     
     print(f"✅ Ссылка: {vk_link}")
     
-    # Проверяем лайки
     all_liked = True
     with queue_lock:
         for item in queue[-10:]:
@@ -365,16 +361,18 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int):
 
 @app.route('/', methods=['POST'])
 def callback():
-    """Обработка Callback API от VK"""
+    """Обработка Callback API"""
     try:
         data = request.json
+        print(f"📥 Получен запрос: {data.get('type', 'unknown')}")
         
-        # Если это запрос на подтверждение сервера
+        # ВАЖНО: Для подтверждения возвращаем ТОЛЬКО код
         if data.get('type') == 'confirmation':
-            print("🔑 Запрос на подтверждение")
-            return CONFIRMATION_CODE
+            print(f"🔑 Запрос на подтверждение")
+            # Возвращаем код как plain text
+            return Response(CONFIRMATION_CODE, mimetype='text/plain')
         
-        # Если это новое сообщение
+        # Для новых сообщений
         if data.get('type') == 'message_new':
             message = data.get('object', {}).get('message', {})
             
@@ -383,7 +381,8 @@ def callback():
             text = message.get('text', '')
             message_id = message.get('conversation_message_id', message.get('id', 0))
             
-            # Обрабатываем в отдельном потоке
+            print(f"📨 Новое сообщение от {user_id}")
+            
             thread = threading.Thread(
                 target=process_message,
                 args=(peer_id, user_id, text, message_id),
@@ -391,7 +390,7 @@ def callback():
             )
             thread.start()
         
-        # Возвращаем "ok" для всех остальных запросов
+        # Для всех остальных запросов возвращаем "ok"
         return 'ok'
     except Exception as e:
         print(f"❌ Ошибка Callback: {e}")
@@ -404,7 +403,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("🚀 Бот запущен с Callback API")
     print(f"📌 ID группы: {GROUP_ID}")
+    print(f"🔑 Код подтверждения: {CONFIRMATION_CODE[:5]}...")
     print("=" * 60)
     
-    # Запускаем Flask сервер на порту 8080
     app.run(host='0.0.0.0', port=8080)
