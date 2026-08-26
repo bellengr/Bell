@@ -1,4 +1,5 @@
 import sys
+import os
 import re
 import time
 import json
@@ -26,7 +27,8 @@ except ImportError as e:
 TOKEN = "vk1.a.s5mgEVHWOVgpTPQ2AhN4hYF15Tc6vsHIsmavsZNDFTZkvKB-mwOR-f1aUuQ27AWpc5wfZLZH42iJy74xZDafcBZJwzmupX8OUN8MnlDxZYuHLk5NrJHDwIUuFiDy6S8OTbl0trJEUg77amTmVsgZPypu-EkumFvDiQFIkMt3twuGQD2PpnckpaASfFXLw0HMxp3CbBTZsLy1DEilvoJRbA"  # ← ЗАМЕНИТЕ НА ВАШ ТОКЕН
 GROUP_ID = 241064421
 CONFIRMATION_CODE = "134086a7"
-PORT = 3000
+# Порт берем из переменной окружения или используем 3000
+PORT = int(os.getenv("PORT", 3000))
 # ======================================================
 
 MAX_QUEUE_SIZE = 10
@@ -367,7 +369,6 @@ class CallbackHandler(BaseHTTPRequestHandler):
         try:
             data = json.loads(body)
             
-            # Для подтверждения возвращаем ТОЛЬКО код
             if data.get('type') == 'confirmation':
                 response_body = CONFIRMATION_CODE.encode('utf-8')
                 self.send_response(200)
@@ -377,7 +378,6 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 self.wfile.write(response_body)
                 print(f"🔑 Отправлен код: {CONFIRMATION_CODE}", flush=True)
             
-            # Для новых сообщений
             elif data.get('type') == 'message_new':
                 message = data.get('object', {}).get('message', {})
                 
@@ -399,9 +399,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-Length', str(len(response_body)))
                 self.end_headers()
                 self.wfile.write(response_body)
-                print("✅ Отправлено: ok", flush=True)
             
-            # Для остальных запросов
             else:
                 response_body = b'ok'
                 self.send_response(200)
@@ -412,6 +410,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 
         except Exception as e:
             print(f"❌ Ошибка: {e}", flush=True)
+            traceback.print_exc()
             response_body = b'ok'
             self.send_response(200)
             self.send_header('Content-Type', 'text/plain; charset=utf-8')
@@ -430,11 +429,12 @@ if __name__ == "__main__":
     print("🚀 Бот запущен с Callback API")
     print(f"📌 ID группы: {GROUP_ID}")
     print(f"🔑 Код: {CONFIRMATION_CODE}")
-    print(f"📡 Порт: {PORT}")
+    print(f"📡 Порт из окружения: {PORT}")
     print("=" * 60)
     sys.stdout.flush()
     
+    # ВАЖНО: Используем 0.0.0.0 и порт из переменной окружения
     server = HTTPServer(('0.0.0.0', PORT), CallbackHandler)
-    print(f"✅ Сервер запущен на порту {PORT}")
+    print(f"✅ Сервер запущен на 0.0.0.0:{PORT}")
     sys.stdout.flush()
     server.serve_forever()
