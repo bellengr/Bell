@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import threading
 import traceback
 from typing import Optional, List, Tuple
-from flask import Flask, request, make_response
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 print("=" * 60)
 print("🚀 БОТ ЗАПУСКАЕТСЯ (Callback API)...")
@@ -23,16 +23,15 @@ except ImportError as e:
     raise
 
 # ====================== НАСТРОЙКИ ======================
-TOKEN = "vk1.a.s5mgEVHWOVgpTPQ2AhN4hYF15Tc6vsHIsmavsZNDFTZkvKB-mwOR-f1aUuQ27AWpc5wfZLZH42iJy74xZDafcBZJwzmupX8OUN8MnlDxZYuHLk5NrJHDwIUuFiDy6S8OTbl0trJEUg77amTmVsgZPypu-EkumFvDiQFIkMt3twuGQD2PpnckpaASfFXLw0HMxp3CbBTZsLy1DEilvoJRbA"
+TOKEN = "vk1.a.s5mgEVHWOVgpTPQ2AhN4hYF15Tc6vsHIsmavsZNDFTZkvKB-mwOR-f1aUuQ27AWpc5wfZLZH42iJy74xZDafcBZJwzmupX8OUN8MnlDxZYuHLk5NrJHDwIUuFiDy6S8OTbl0trJEUg77amTmVsgZPypu-EkumFvDiQFIkMt3twuGQD2PpnckpaASfFXLw0HMxp3CbBTZsLy1DEilvoJRbA"  # ← ЗАМЕНИТЕ НА ВАШ ТОКЕН
 GROUP_ID = 241064421
 CONFIRMATION_CODE = "134086a7"
+PORT = 3000
 # ======================================================
 
 MAX_QUEUE_SIZE = 10
 RATE_LIMIT_DELAY = 0.34
 DB_FILE = "bot_database.db"
-
-app = Flask(__name__)
 
 queue = []
 queue_lock = threading.Lock()
@@ -358,47 +357,70 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int):
     print(f"✅ Опубликовано!")
     send_message(peer_id, f"✅ Ссылка {vk_link} опубликована!\n📊 В очереди: {len(queue)}")
 
-@app.route('/', methods=['POST'])
-def callback():
-    try:
-        data = request.get_json(silent=True)
+class CallbackHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length)
         
-        if data is None:
-            # Если не JSON, читаем сырые данные
-            raw_data = request.get_data(as_text=True)
-            print(f"📥 Получены сырые данные: {raw_data}", flush=True)
-            return 'ok'
+        print(f"📥 Получен запрос: {body.decode('utf-8')}", flush=True)
         
-        print(f"📥 Получен запрос: {data.get('type', 'unknown')}", flush=True)
-        
-        if data.get('type') == 'confirmation':
-            print(f"🔑 Возвращаю код: {CONFIRMATION_CODE}", flush=True)
+        try:
+            data = json.loads(body)
             
-            # Создаем ответ с чистой строкой
-            response = make_response(CONFIRMATION_CODE)
-            response.headers['Content-Type'] = 'text/plain; charset=utf-8'
-            response.headers['Content-Length'] = str(len(CONFIRMATION_CODE))
-            return response
-        
-        if data.get('type') == 'message_new':
-            message = data.get('object', {}).get('message', {})
+            # Для подтверждения возвращаем ТОЛЬКО код
+            if data.get('type') == 'confirmation':
+                response_body = CONFIRMATION_CODE.encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Length', str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+                print(f"🔑 Отправлен код: {CONFIRMATION_CODE}", flush=True)
             
-            peer_id = message.get('peer_id', 0)
-            user_id = message.get('from_id', 0)
-            text = message.get('text', '')
-            message_id = message.get('conversation_message_id', message.get('id', 0))
+            # Для новых сообщений
+            elif data.get('type') == 'message_new':
+                message = data.get('object', {}).get('message', {})
+                
+                peer_id = message.get('peer_id', 0)
+                user_id = message.get('from_id', 0)
+                text = message.get('text', '')
+                message_id = message.get('conversation_message_id', message.get('id', 0))
+                
+                thread = threading.Thread(
+                    target=process_message,
+                    args=(peer_id, user_id, text, message_id),
+                    daemon=True
+                )
+                thread.start()
+                
+                response_body = b'ok'
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Length', str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+                print("✅ Отправлено: ok", flush=True)
             
-            thread = threading.Thread(
-                target=process_message,
-                args=(peer_id, user_id, text, message_id),
-                daemon=True
-            )
-            thread.start()
-        
-        return 'ok'
-    except Exception as e:
-        print(f"❌ Ошибка Callback: {e}", flush=True)
-        return 'ok'
+            # Для остальных запросов
+            else:
+                response_body = b'ok'
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Length', str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+                
+        except Exception as e:
+            print(f"❌ Ошибка: {e}", flush=True)
+            response_body = b'ok'
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Length', str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+    
+    def log_message(self, format, *args):
+        print(f"📝 {format % args}", flush=True)
 
 if __name__ == "__main__":
     init_database()
@@ -408,8 +430,11 @@ if __name__ == "__main__":
     print("🚀 Бот запущен с Callback API")
     print(f"📌 ID группы: {GROUP_ID}")
     print(f"🔑 Код: {CONFIRMATION_CODE}")
+    print(f"📡 Порт: {PORT}")
     print("=" * 60)
     sys.stdout.flush()
     
-    # Порт 3000
-    app.run(host='0.0.0.0', port=3000, debug=False)
+    server = HTTPServer(('0.0.0.0', PORT), CallbackHandler)
+    print(f"✅ Сервер запущен на порту {PORT}")
+    sys.stdout.flush()
+    server.serve_forever()
