@@ -1,5 +1,4 @@
 import sys
-import os
 import re
 import time
 import json
@@ -8,25 +7,25 @@ from datetime import datetime, timedelta
 import threading
 import traceback
 from typing import Optional, List, Tuple
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
 print("=" * 60)
-print("🚀 БОТ ЗАПУСКАЕТСЯ...")
+print("🚀 БОТ ЗАПУСКАЕТСЯ (Long Poll)...")
 print("=" * 60)
 sys.stdout.flush()
 
 try:
     import vk_api
+    from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
     from vk_api.exceptions import ApiError
     print("✅ Библиотека vk-api загружена")
 except ImportError as e:
     print(f"❌ Ошибка импорта: {e}")
     raise
 
+# ====================== НАСТРОЙКИ ======================
 TOKEN = "vk1.a.s5mgEVHWOVgpTPQ2AhN4hYF15Tc6vsHIsmavsZNDFTZkvKB-mwOR-f1aUuQ27AWpc5wfZLZH42iJy74xZDafcBZJwzmupX8OUN8MnlDxZYuHLk5NrJHDwIUuFiDy6S8OTbl0trJEUg77amTmVsgZPypu-EkumFvDiQFIkMt3twuGQD2PpnckpaASfFXLw0HMxp3CbBTZsLy1DEilvoJRbA"
 GROUP_ID = 241064421
-CONFIRMATION_CODE = "134086a7"
-PORT = int(os.getenv("PORT", 3000))
+# ======================================================
 
 MAX_QUEUE_SIZE = 10
 RATE_LIMIT_DELAY = 0.34
@@ -41,6 +40,7 @@ def init_database():
     try:
         conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         cursor = conn.cursor()
+        
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,6 +49,7 @@ def init_database():
                 timestamp TEXT NOT NULL
             )
         ''')
+        
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS vip_links (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,6 +58,7 @@ def init_database():
                 expires_at TEXT NOT NULL
             )
         ''')
+        
         conn.commit()
         conn.close()
         print("✅ База данных инициализирована")
@@ -68,6 +70,7 @@ def load_data():
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
+        
         cursor.execute('SELECT link, user_id, timestamp FROM queue ORDER BY id DESC LIMIT ?', (MAX_QUEUE_SIZE,))
         rows = cursor.fetchall()
         queue = []
@@ -77,6 +80,7 @@ def load_data():
                 'user_id': row[1],
                 'timestamp': datetime.fromisoformat(row[2])
             })
+        
         cursor.execute('SELECT link, added_by, expires_at FROM vip_links WHERE expires_at > ?', 
                       (datetime.now().isoformat(),))
         vip_rows = cursor.fetchall()
@@ -87,6 +91,7 @@ def load_data():
                 'added_by': row[1],
                 'expires_at': datetime.fromisoformat(row[2])
             })
+        
         conn.close()
         print(f"📂 Загружено: {len(queue)} ссылок, {len(vip_links)} VIP")
     except Exception as e:
@@ -148,6 +153,7 @@ def is_admin_or_owner(peer_id: int, user_id: int) -> bool:
 def extract_vk_link(text: str) -> Optional[str]:
     if not text:
         return None
+    
     patterns = [
         r'(wall-?\d+_\d+)',
         r'(photo-?\d+_\d+)',
@@ -157,21 +163,26 @@ def extract_vk_link(text: str) -> Optional[str]:
         r'(topic-?\d+_\d+)',
         r'(market-?\d+_\d+)',
     ]
+    
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
             return match.group(1)
+    
     return None
 
 def get_content_type(vk_link: str) -> Tuple[str, int, int]:
     if '_' not in vk_link:
         return '', 0, 0
+    
     parts = vk_link.split('_')
     type_and_owner = parts[0]
+    
     try:
         item_id = int(parts[1])
     except:
         return '', 0, 0
+    
     if type_and_owner.startswith('wall'):
         return 'post', int(type_and_owner[4:]), item_id
     elif type_and_owner.startswith('photo'):
@@ -186,12 +197,15 @@ def get_content_type(vk_link: str) -> Tuple[str, int, int]:
         return 'market', int(type_and_owner[6:]), item_id
     elif type_and_owner.startswith('topic'):
         return 'topic', int(type_and_owner[5:]), item_id
+    
     return '', 0, 0
 
 def check_like(user_id: int, vk_link: str) -> bool:
     content_type, owner_id, item_id = get_content_type(vk_link)
+    
     if not content_type or owner_id == 0 or item_id == 0:
         return True
+    
     try:
         rate_limit()
         response = vk.likes.isLiked(
@@ -200,6 +214,7 @@ def check_like(user_id: int, vk_link: str) -> bool:
             owner_id=owner_id,
             item_id=item_id
         )
+        
         if isinstance(response, dict):
             return response.get('liked', 0) == 1
         return response == 1
@@ -216,48 +231,22 @@ def can_user_post(user_id: int) -> bool:
         posts_after = len(queue) - last_post_index - 1
         return posts_after >= 5
 
-def send_message(peer_id: int, text: str) -> Optional[int]:
+def send_message(peer_id: int, text: str):
     try:
         rate_limit()
-        result = vk.messages.send(
+        vk.messages.send(
             peer_id=peer_id,
             message=text,
             random_id=int(time.time() * 1000)
         )
-        print(f"✅ Отправлено: {text[:50]}... ID: {result}")
-        if result and result > 0:
-            schedule_delete(peer_id, result, 40)
-        return result
+        print(f"✅ Отправлено: {text[:50]}...")
     except Exception as e:
         print(f"❌ Ошибка отправки: {e}")
-        return None
-
-def schedule_delete(peer_id: int, message_id: int, delay: int):
-    def delete_after_delay():
-        time.sleep(delay)
-        try:
-            rate_limit()
-            if peer_id >= 2000000000:
-                vk.messages.delete(
-                    peer_id=peer_id,
-                    cmids=[message_id],
-                    delete_for_all=True
-                )
-            else:
-                vk.messages.delete(
-                    peer_id=peer_id,
-                    message_ids=[message_id],
-                    delete_for_all=True
-                )
-            print(f"🗑️ Удалено сообщение бота {message_id}")
-        except Exception as e:
-            print(f"❌ Ошибка удаления {message_id}: {e}")
-    thread = threading.Thread(target=delete_after_delay, daemon=True)
-    thread.start()
 
 def delete_message(peer_id: int, message_id: int) -> bool:
     if not message_id or message_id == 0:
         return False
+    
     try:
         rate_limit()
         if peer_id >= 2000000000:
@@ -278,40 +267,62 @@ def delete_message(peer_id: int, message_id: int) -> bool:
         print(f"❌ Ошибка удаления: {e}")
         return False
 
-def process_message(peer_id: int, user_id: int, text: str, message_id: int):
+def process_message(event):
     global queue
-    print(f"\n📩 Сообщение от {user_id}: {text[:50] if text else '(пусто)'}")
+    
+    print("\n📩 Новое сообщение")
+    
+    try:
+        message = event.object.message
+        peer_id = message['peer_id']
+        user_id = message['from_id']
+        text = message.get('text', '').strip()
+        message_id = message.get('conversation_message_id', message.get('id', 0))
+    except Exception as e:
+        print(f"⚠️ Ошибка чтения: {e}")
+        return
+    
+    print(f"👤 {user_id}: {text[:50] if text else '(пусто)'}")
+    
     if user_id < 0:
         return
+    
     if is_admin_or_owner(peer_id, user_id):
         print(f"👑 Админ/владелец, игнорируем")
         return
+    
     vk_link = extract_vk_link(text)
+    
     if not vk_link:
         print(f"🗑️ Нет ссылки, удаляем")
         if message_id:
             delete_message(peer_id, message_id)
         send_message(peer_id, "🔗 Нужна ссылка на контент ВКонтакте!")
         return
+    
     print(f"✅ Ссылка: {vk_link}")
+    
     all_liked = True
     with queue_lock:
         for item in queue[-10:]:
             if not check_like(user_id, item['link']):
                 all_liked = False
                 break
+    
     if not all_liked:
         print(f"❌ Не все лайки")
         if message_id:
             delete_message(peer_id, message_id)
         send_message(peer_id, "❌ Поставь лайки на предыдущие ссылки!")
         return
+    
     if not can_user_post(user_id):
         print(f"⏳ Слишком часто")
         if message_id:
             delete_message(peer_id, message_id)
         send_message(peer_id, "⏳ Подожди, нужно 5 чужих постов!")
         return
+    
     with queue_lock:
         queue.append({
             'link': vk_link,
@@ -321,103 +332,34 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int):
         if len(queue) > MAX_QUEUE_SIZE:
             queue = queue[-MAX_QUEUE_SIZE:]
         save_queue()
+    
     print(f"✅ Опубликовано!")
     send_message(peer_id, f"✅ Ссылка {vk_link} опубликована!\n📊 В очереди: {len(queue)}")
 
-class CallbackHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        """Обработка GET запросов для проверки"""
-        print(f"📥 GET запрос: {self.path}", flush=True)
-        
-        if self.path == '/test':
-            response_body = CONFIRMATION_CODE.encode('utf-8')
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/plain; charset=utf-8')
-            self.send_header('Content-Length', str(len(response_body)))
-            self.end_headers()
-            self.wfile.write(response_body)
-            print(f"🔑 Отправлен тестовый код: {CONFIRMATION_CODE}", flush=True)
-        else:
-            response_body = b'Bot is running'
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/plain; charset=utf-8')
-            self.send_header('Content-Length', str(len(response_body)))
-            self.end_headers()
-            self.wfile.write(response_body)
+def main():
+    global vk
     
-    def do_POST(self):
-        content_length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(content_length)
-        
-        print(f"📥 POST запрос: {body.decode('utf-8')}", flush=True)
-        
-        try:
-            data = json.loads(body)
-            
-            if data.get('type') == 'confirmation':
-                response_body = CONFIRMATION_CODE.encode('utf-8')
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain; charset=utf-8')
-                self.send_header('Content-Length', str(len(response_body)))
-                self.end_headers()
-                self.wfile.write(response_body)
-                print(f"🔑 Отправлен код: {CONFIRMATION_CODE}", flush=True)
-            
-            elif data.get('type') == 'message_new':
-                message = data.get('object', {}).get('message', {})
-                peer_id = message.get('peer_id', 0)
-                user_id = message.get('from_id', 0)
-                text = message.get('text', '')
-                message_id = message.get('conversation_message_id', message.get('id', 0))
-                
-                thread = threading.Thread(
-                    target=process_message,
-                    args=(peer_id, user_id, text, message_id),
-                    daemon=True
-                )
-                thread.start()
-                
-                response_body = b'ok'
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain; charset=utf-8')
-                self.send_header('Content-Length', str(len(response_body)))
-                self.end_headers()
-                self.wfile.write(response_body)
-            
-            else:
-                response_body = b'ok'
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain; charset=utf-8')
-                self.send_header('Content-Length', str(len(response_body)))
-                self.end_headers()
-                self.wfile.write(response_body)
-                
-        except Exception as e:
-            print(f"❌ Ошибка: {e}", flush=True)
-            traceback.print_exc()
-            response_body = b'ok'
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/plain; charset=utf-8')
-            self.send_header('Content-Length', str(len(response_body)))
-            self.end_headers()
-            self.wfile.write(response_body)
-    
-    def log_message(self, format, *args):
-        print(f"📝 {format % args}", flush=True)
-
-if __name__ == "__main__":
     init_database()
     load_data()
     
-    print("=" * 60)
-    print("🚀 Бот запущен")
-    print(f"📌 ID группы: {GROUP_ID}")
-    print(f"🔑 Код: {CONFIRMATION_CODE}")
-    print(f"📡 Порт: {PORT}")
-    print("=" * 60)
-    sys.stdout.flush()
-    
-    server = HTTPServer(('0.0.0.0', PORT), CallbackHandler)
-    print(f"✅ Сервер запущен на 0.0.0.0:{PORT}")
-    sys.stdout.flush()
-    server.serve_forever()
+    try:
+        print("🔄 Подключение к VK API...")
+        vk_session = vk_api.VkApi(token=TOKEN)
+        vk = vk_session.get_api()
+        
+        print("🔄 Подключение Long Poll...")
+        longpoll = VkBotLongPoll(vk_session, GROUP_ID)
+        
+        print("✅ Бот запущен!")
+        print("=" * 60)
+        
+        for event in longpoll.listen():
+            if event.type == VkBotEventType.MESSAGE_NEW:
+                process_message(event)
+                
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    main()
