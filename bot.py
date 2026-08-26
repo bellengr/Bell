@@ -364,9 +364,10 @@ def callback():
         data = request.json
         print(f"📥 Получен запрос: {data.get('type', 'unknown')}", flush=True)
         
+        # ВАЖНО: Для подтверждения возвращаем ТОЛЬКО строку
         if data.get('type') == 'confirmation':
-            print(f"🔑 Возвращаю код: {CONFIRMATION_CODE}", flush=True)
-            return Response(CONFIRMATION_CODE, mimetype='text/plain')
+            print(f"🔑 Возвращаю: {CONFIRMATION_CODE}", flush=True)
+            return CONFIRMATION_CODE  # Просто строка, без Response!
         
         if data.get('type') == 'message_new':
             message = data.get('object', {}).get('message', {})
@@ -395,9 +396,9 @@ if __name__ == "__main__":
     print("=" * 60)
     print("🚀 Бот запущен с Callback API")
     print(f"📌 ID группы: {GROUP_ID}")
-    print(f"🔑 Код подтверждения: {CONFIRMATION_CODE}")
+    print(f"🔑 Код: {CONFIRMATION_CODE}")
     print("=" * 60)
     sys.stdout.flush()
     
-    # ВАЖНО: Порт 80!
+    # Порт 80!
     app.run(host='0.0.0.0', port=80, debug=False)
