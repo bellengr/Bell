@@ -26,7 +26,7 @@ except ImportError as e:
     raise
 
 # ====================== НАСТРОЙКИ ======================
-TOKEN = "vk1.a.s5mgEVHWOVgpTPQ2AhN4hYF15Tc6vsHIsmavsZNDFTZkvKB-mwOR-f1aUuQ27AWpc5wfZLZH42iJy74xZDafcBZJwzmupX8OUN8MnlDxZYuHLk5NrJHDwIUuFiDy6S8OTbl0trJEUg77amTmVsgZPypu-EkumFvDiQFIkMt3twuGQD2PpnckpaASfFXLw0HMxp3CbBTZsLy1DEilvoJRbA"
+TOKEN = "vk1.a.s5mgEVHWOVgpTPQ2AhN4hYF15Tc6vsHIsmavsZNDFTZkvKB-mwOR-f1aUuQ27AWpc5wfZLZH42iJy74xZDafcBZJwzmupX8OUN8MnlDxZYuHLk5NrJHDwIUuFiDy6S8OTbl0trJEUg77amTmVsgZPypu-EkumFvDiQFIkMt3twuGQD2PpnckpaASfFXLw0HMxp3CbBTZsLy1DEilvoJRbA"  # ← ЗАМЕНИТЕ НА НОВЫЙ ТОКЕН!
 GROUP_ID = 241064421
 # ======================================================
 
@@ -400,10 +400,12 @@ def get_posts_after_user(user_id: int) -> int:
         return len(queue) - last_post_index - 1
 
 def send_message(peer_id: int, text: str) -> Optional[int]:
+    """Отправка сообщения с получением ID для удаления"""
     global bot_messages
     try:
         rate_limit()
         
+        # Отправляем сообщение
         result = vk.messages.send(
             peer_id=peer_id,
             message=text,
@@ -413,15 +415,17 @@ def send_message(peer_id: int, text: str) -> Optional[int]:
         print(f"✅ Отправлено сообщение в {peer_id}")
         print(f"   Результат отправки: {result}")
         
+        # Пытаемся получить ID сообщения
         message_id = None
         
+        # Если API вернул ID
         if isinstance(result, dict):
             message_id = result.get('message_id')
         elif isinstance(result, int) and result > 0:
             message_id = result
         
+        # Если ID не получен, пробуем через getHistory
         if not message_id:
-            print(f"   🔍 Ищем ID сообщения в истории...")
             try:
                 rate_limit()
                 history = vk.messages.getHistory(
@@ -431,22 +435,24 @@ def send_message(peer_id: int, text: str) -> Optional[int]:
                 items = history.get('items', [])
                 
                 for msg in items:
-                    if msg.get('from_id', 0) < 0:
+                    if msg.get('from_id', 0) < 0:  # Сообщение от бота
                         message_id = msg.get('conversation_message_id', msg.get('id', 0))
                         if message_id:
-                            print(f"   ✅ Найден ID сообщения бота: {message_id}")
+                            print(f"   ✅ Найден ID: {message_id}")
                             break
             except Exception as e:
-                print(f"   ⚠️ Не удалось найти ID: {e}")
+                print(f"   ⚠️ Не удалось получить ID из истории: {e}")
         
+        # Сохраняем для удаления
         if message_id:
             with bot_messages_lock:
                 if peer_id not in bot_messages:
                     bot_messages[peer_id] = []
                 bot_messages[peer_id].append(message_id)
-                print(f"   💾 Сохранено сообщение {message_id} для удаления")
-        else:
-            print(f"   ⚠️ Не удалось получить ID сообщения для удаления")
+                print(f"   💾 Сохранено для удаления: {message_id}")
+            
+            # Запускаем таймер удаления
+            delete_bot_messages(peer_id, BOT_MESSAGE_DELAY)
         
         return message_id
     except ApiError as e:
@@ -460,67 +466,57 @@ def send_message(peer_id: int, text: str) -> Optional[int]:
 
 def delete_message(peer_id: int, message_id: int) -> bool:
     if not message_id or message_id == 0:
-        print(f"⚠️ Невалидный ID сообщения: {message_id}")
         return False
     
     try:
         rate_limit()
         
         if peer_id >= 2000000000:
-            print(f"🗑️ Удаляем через cmids: {message_id}")
             vk.messages.delete(
                 peer_id=peer_id,
                 cmids=[message_id],
                 delete_for_all=True
             )
         else:
-            print(f"🗑️ Удаляем через message_ids: {message_id}")
             vk.messages.delete(
                 peer_id=peer_id,
                 message_ids=[message_id],
                 delete_for_all=True
             )
         
-        print(f"✅ Сообщение {message_id} удалено")
+        print(f"🗑️ Удалено сообщение {message_id}")
         return True
     except ApiError as e:
         if e.code == 15:
             print(f"ℹ️ Сообщение {message_id} уже удалено")
             return True
-        elif e.code == 924:
-            print(f"❌ Нет прав на удаление {message_id}")
-            return False
         else:
-            print(f"❌ API ошибка удаления {message_id}: {e}")
+            print(f"❌ Ошибка удаления {message_id}: {e}")
             return False
     except Exception as e:
         print(f"❌ Ошибка удаления {message_id}: {e}")
         return False
 
 def delete_bot_messages(peer_id: int, delay: int = BOT_MESSAGE_DELAY):
+    """Удаление сообщений бота с задержкой"""
     global bot_messages
     with bot_messages_lock:
         if peer_id not in bot_messages or not bot_messages[peer_id]:
-            print(f"ℹ️ Нет сообщений бота для удаления")
             return
         
         messages_to_delete = bot_messages[peer_id].copy()
         bot_messages[peer_id] = []
     
+    if not messages_to_delete:
+        return
+    
     print(f"🔄 Запланировано удаление {len(messages_to_delete)} сообщений через {delay} секунд")
-    print(f"   📋 ID сообщений: {messages_to_delete}")
     
     def delete_after_delay():
         time.sleep(delay)
-        deleted_count = 0
-        
         for msg_id in messages_to_delete:
-            if delete_message(peer_id, msg_id):
-                deleted_count += 1
+            delete_message(peer_id, msg_id)
             time.sleep(0.5)
-        
-        print(f"🗑️ Итог: удалено {deleted_count} из {len(messages_to_delete)} сообщений бота")
-        sys.stdout.flush()
     
     thread = threading.Thread(target=delete_after_delay, daemon=True)
     thread.start()
@@ -552,7 +548,6 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int) -> bool:
             save_vip_links()
         
         send_message(peer_id, f"⭐ VIP-ссылка {vk_link} добавлена!\n⏳ Действует до: {expires_at.strftime('%d.%m.%Y %H:%M')}")
-        delete_bot_messages(peer_id, BOT_MESSAGE_DELAY)
         return True
     
     if text.lower().startswith('!delvip'):
@@ -582,7 +577,6 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int) -> bool:
             save_vip_links()
         
         send_message(peer_id, f"✅ VIP-ссылка {vk_link} удалена.")
-        delete_bot_messages(peer_id, BOT_MESSAGE_DELAY)
         return True
     
     if text.lower() == '!vip_list':
@@ -600,14 +594,13 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int) -> bool:
                 vip_text += f"{i}. {vip['link']} (осталось {hours}ч {minutes}мин)\n"
         
         send_message(peer_id, vip_text)
-        delete_bot_messages(peer_id, BOT_MESSAGE_DELAY)
         return True
     
     return False
 
 def process_message(event):
     """Обработка входящего сообщения"""
-    global queue  # ВАЖНО: Должно быть здесь, в начале функции!
+    global queue
     
     print("\n📩 Получено новое сообщение")
     
@@ -650,7 +643,6 @@ def process_message(event):
             delete_message(peer_id, message_id)
         
         send_message(peer_id, "🔗 Для публикации нужна ссылка на контент ВКонтакте.\n📌 Поддерживаются: посты, клипы, видео, фото, альбомы.")
-        delete_bot_messages(peer_id, BOT_MESSAGE_DELAY)
         return
     
     print(f"✅ Найдена ссылка: {vk_link}")
@@ -665,7 +657,6 @@ def process_message(event):
             delete_message(peer_id, message_id)
         
         send_message(peer_id, f"⭐ Ты должен поставить лайки на ВСЕ VIP-ссылки:\n{vip_text}")
-        delete_bot_messages(peer_id, BOT_MESSAGE_DELAY)
         return
     
     if not can_user_post(user_id):
@@ -678,7 +669,6 @@ def process_message(event):
             delete_message(peer_id, message_id)
         
         send_message(peer_id, f"⏳ Ты можешь отправить новую ссылку только после {need_to_wait} чужих постов.\n📊 Сейчас прошло {posts_after}.")
-        delete_bot_messages(peer_id, BOT_MESSAGE_DELAY)
         return
     
     all_liked, missing_links = check_previous_likes(user_id)
@@ -690,7 +680,6 @@ def process_message(event):
             delete_message(peer_id, message_id)
         
         send_message(peer_id, f"❌ Ты пропустил лайки на эти ссылки:\n{missing_text}\n\n📌 Поставь лайки и отправь ссылку заново!")
-        delete_bot_messages(peer_id, BOT_MESSAGE_DELAY)
         return
     
     print(f"✅ Все условия выполнены! Публикуем ссылку")
@@ -709,10 +698,8 @@ def process_message(event):
         
         save_queue_to_db()
     
-    delete_bot_messages(peer_id, BOT_MESSAGE_DELAY)
-    
+    # Отправляем подтверждение
     send_message(peer_id, f"✅ Ссылка {vk_link} опубликована!\n📊 В очереди: {len(queue)} ссылок\n⏳ Ждём тебя через 5 ссылок!")
-    delete_bot_messages(peer_id, BOT_MESSAGE_DELAY)
 
 def handle_event(event):
     if event.type == VkBotEventType.MESSAGE_NEW:
