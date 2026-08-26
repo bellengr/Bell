@@ -25,7 +25,7 @@ except ImportError as e:
 # ====================== НАСТРОЙКИ ======================
 TOKEN = "vk1.a.s5mgEVHWOVgpTPQ2AhN4hYF15Tc6vsHIsmavsZNDFTZkvKB-mwOR-f1aUuQ27AWpc5wfZLZH42iJy74xZDafcBZJwzmupX8OUN8MnlDxZYuHLk5NrJHDwIUuFiDy6S8OTbl0trJEUg77amTmVsgZPypu-EkumFvDiQFIkMt3twuGQD2PpnckpaASfFXLw0HMxp3CbBTZsLy1DEilvoJRbA"  # ← ЗАМЕНИТЕ
 GROUP_ID = 241064421  # ← ВАШ ID ГРУППЫ
-CONFIRMATION_CODE = "e52df98c"  # ← ЗАМЕНИТЕ НА КОД ИЗ VK
+CONFIRMATION_CODE = "134086a7"  # ← ЗАМЕНИТЕ НА КОД ИЗ VK
 # ======================================================
 
 MAX_QUEUE_SIZE = 10
