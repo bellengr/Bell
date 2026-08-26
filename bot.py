@@ -2,7 +2,8 @@ import sys
 import os
 import re
 import time
-import sqlite3  # ВАЖНО: в новой версии используется SQLite, а не JSON файл!
+import json
+import sqlite3
 from datetime import datetime, timedelta
 import threading
 import traceback
@@ -25,7 +26,7 @@ except ImportError as e:
     raise
 
 # ====================== НАСТРОЙКИ ======================
-TOKEN = "vk1.a.s5mgEVHWOVgpTPQ2AhN4hYF15Tc6vsHIsmavsZNDFTZkvKB-mwOR-f1aUuQ27AWpc5wfZLZH42iJy74xZDafcBZJwzmupX8OUN8MnlDxZYuHLk5NrJHDwIUuFiDy6S8OTbl0trJEUg77amTmVsgZPypu-EkumFvDiQFIkMt3twuGQD2PpnckpaASfFXLw0HMxp3CbBTZsLy1DEilvoJRbA"  # ВАШ ТОКЕН
+TOKEN = "vk1.a.s5mgEVHWOVgpTPQ2AhN4hYF15Tc6vsHIsmavsZNDFTZkvKB-mwOR-f1aUuQ27AWpc5wfZLZH42iJy74xZDafcBZJwzmupX8OUN8MnlDxZYuHLk5NrJHDwIUuFiDy6S8OTbl0trJEUg77amTmVsgZPypu-EkumFvDiQFIkMt3twuGQD2PpnckpaASfFXLw0HMxp3CbBTZsLy1DEilvoJRbA"  # Замените на ваш токен
 GROUP_ID = 241064421  # ВАШ ID ГРУППЫ
 # ======================================================
 
@@ -34,7 +35,7 @@ MAX_QUEUE_SIZE = 10
 VIP_DURATION_HOURS = 24
 BOT_MESSAGE_DELAY = 40
 RATE_LIMIT_DELAY = 0.34
-DB_FILE = "bot_database.db"  # ВАЖНО: SQLite база данных!
+DB_FILE = "bot_database.db"
 
 # Глобальные переменные
 queue = []
@@ -50,7 +51,7 @@ admin_cache_lock = threading.Lock()
 admin_cache_time = {}
 
 def init_database():
-    """Инициализация базы данных SQLite"""
+    """Инициализация базы данных"""
     try:
         conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         cursor = conn.cursor()
@@ -75,7 +76,7 @@ def init_database():
         
         conn.commit()
         conn.close()
-        print("✅ База данных SQLite инициализирована")
+        print("✅ База данных инициализирована")
     except Exception as e:
         print(f"❌ Ошибка инициализации БД: {e}")
     sys.stdout.flush()
@@ -136,12 +137,12 @@ def get_chat_owner(peer_id: int) -> Optional[int]:
 
 def is_admin_or_owner(peer_id: int, user_id: int) -> bool:
     """Проверка прав администратора или владельца"""
-    # Проверяем, является ли пользователь админом группы
+    # Проверяем админа группы
     if is_group_admin(user_id):
         print(f"👑 {user_id} - админ группы")
         return True
     
-    # Проверяем, является ли пользователь владельцем чата
+    # Проверяем владельца чата
     owner_id = get_chat_owner(peer_id)
     if owner_id == user_id:
         print(f"👑 {user_id} - владелец чата")
@@ -351,18 +352,32 @@ def send_message(peer_id: int, text: str) -> Optional[int]:
         sys.stdout.flush()
 
 def delete_message(peer_id: int, message_id: int) -> bool:
-    """Удаление сообщения"""
+    """Удаление сообщения (используем cmids для бесед)"""
     if not message_id or message_id == 0:
+        print(f"⚠️ Невалидный ID сообщения: {message_id}")
         return False
     
     try:
         rate_limit()
-        vk.messages.delete(
-            peer_id=peer_id,
-            message_ids=[message_id],
-            delete_for_all=True
-        )
-        print(f"🗑️ Удалено сообщение {message_id}")
+        
+        # Для бесед используем cmids (conversation message IDs)
+        if peer_id >= 2000000000:
+            print(f"🗑️ Удаляем через cmids: {message_id}")
+            vk.messages.delete(
+                peer_id=peer_id,
+                cmids=[message_id],
+                delete_for_all=True
+            )
+        else:
+            # Для личных сообщений используем message_ids
+            print(f"🗑️ Удаляем через message_ids: {message_id}")
+            vk.messages.delete(
+                peer_id=peer_id,
+                message_ids=[message_id],
+                delete_for_all=True
+            )
+        
+        print(f"✅ Сообщение {message_id} удалено")
         return True
     except ApiError as e:
         if e.code == 15:
@@ -373,7 +388,20 @@ def delete_message(peer_id: int, message_id: int) -> bool:
             return False
         else:
             print(f"❌ API ошибка удаления {message_id}: {e}")
-            return False
+            
+            # Пробуем альтернативный метод
+            try:
+                rate_limit()
+                # Пробуем с message_ids
+                vk.messages.delete(
+                    peer_id=peer_id,
+                    message_ids=[message_id],
+                    delete_for_all=True
+                )
+                print(f"✅ Сообщение {message_id} удалено через message_ids")
+                return True
+            except:
+                return False
     except Exception as e:
         print(f"❌ Ошибка удаления {message_id}: {e}")
         return False
@@ -386,6 +414,8 @@ def delete_bot_messages(peer_id: int, delay: int = BOT_MESSAGE_DELAY):
         
         messages_to_delete = bot_messages[peer_id].copy()
         bot_messages[peer_id] = []
+    
+    print(f"🔄 Запланировано удаление {len(messages_to_delete)} сообщений через {delay} секунд")
     
     def delete_after_delay():
         time.sleep(delay)
@@ -421,20 +451,39 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int) -> bool:
                 'added_by': user_id,
                 'expires_at': expires_at
             })
-            # Сохраняем в базу данных
-            try:
-                conn = sqlite3.connect(DB_FILE)
-                cursor = conn.cursor()
-                cursor.execute(
-                    'INSERT INTO vip_links (link, added_by, expires_at) VALUES (?, ?, ?)',
-                    (vk_link, user_id, expires_at.isoformat())
-                )
-                conn.commit()
-                conn.close()
-            except Exception as e:
-                print(f"⚠️ Ошибка сохранения VIP: {e}")
+            save_vip_links()
         
         send_message(peer_id, f"⭐ VIP-ссылка {vk_link} добавлена!\n⏳ Действует до: {expires_at.strftime('%d.%m.%Y %H:%M')}")
+        delete_bot_messages(peer_id, BOT_MESSAGE_DELAY)
+        return True
+    
+    if text.lower().startswith('!delvip'):
+        parts = text.split()
+        if len(parts) < 2:
+            send_message(peer_id, "❌ Формат: !delvip wall-123_456")
+            return True
+        
+        if not is_group_admin(user_id):
+            send_message(peer_id, "❌ Только администраторы группы могут удалять VIP-ссылки.")
+            return True
+        
+        vk_link = parts[1]
+        
+        with vip_links_lock:
+            vip_to_remove = None
+            for vip in vip_links:
+                if vip['link'] == vk_link:
+                    vip_to_remove = vip
+                    break
+            
+            if not vip_to_remove:
+                send_message(peer_id, f"⚠️ VIP-ссылка {vk_link} не найдена.")
+                return True
+            
+            vip_links.remove(vip_to_remove)
+            save_vip_links()
+        
+        send_message(peer_id, f"✅ VIP-ссылка {vk_link} удалена.")
         delete_bot_messages(peer_id, BOT_MESSAGE_DELAY)
         return True
     
@@ -468,11 +517,12 @@ def process_message(event):
         user_id = message['from_id']
         text = message.get('text', '').strip()
         
-        # ВАЖНО: Получаем ID сообщения правильно!
+        # Получаем ID сообщения
         message_id = message.get('conversation_message_id', message.get('id', 0))
         
         print(f"📍 ID сообщения: {message_id}")
-        print(f"📍 Ключи сообщения: {list(message.keys())}")
+        print(f"📍 conversation_message_id: {message.get('conversation_message_id', 'нет')}")
+        print(f"📍 id: {message.get('id', 'нет')}")
         
     except (AttributeError, KeyError) as e:
         print(f"⚠️ Ошибка чтения сообщения: {e}")
@@ -570,20 +620,7 @@ def process_message(event):
         if len(queue) > MAX_QUEUE_SIZE:
             queue = queue[-MAX_QUEUE_SIZE:]
         
-        # Сохраняем в базу данных
-        try:
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            cursor.execute('DELETE FROM queue')
-            for item in queue:
-                cursor.execute(
-                    'INSERT INTO queue (link, user_id, timestamp) VALUES (?, ?, ?)',
-                    (item['link'], item['user_id'], item['timestamp'].isoformat())
-                )
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            print(f"⚠️ Ошибка сохранения очереди: {e}")
+        save_queue_to_db()
     
     # Удаляем сообщения бота
     delete_bot_messages(peer_id, BOT_MESSAGE_DELAY)
@@ -601,6 +638,8 @@ def main():
     """Основная функция"""
     # Инициализация
     init_database()
+    load_queue_from_db()
+    load_vip_links()
     
     # Подключение к VK API
     try:
@@ -610,17 +649,6 @@ def main():
         vk_session = vk_api.VkApi(token=TOKEN)
         global vk
         vk = vk_session.get_api()
-        
-        # Проверяем подключение
-        group_info = vk.groups.getById(group_id=GROUP_ID)
-        print(f"✅ Группа: {group_info[0]['name']}")
-        
-        # Проверяем доступ к сообщениям
-        try:
-            response = vk.messages.getConversations(count=1)
-            print(f"✅ Доступ к сообщениям есть")
-        except ApiError as e:
-            print(f"⚠️ Проблема с доступом к сообщениям: {e}")
         
         print("✅ VK API подключен")
         sys.stdout.flush()
