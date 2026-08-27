@@ -90,7 +90,7 @@ def load_data():
             if expires_at > now:
                 vip_links.append({'link': row[0], 'added_by': row[1], 'expires_at': expires_at})
         conn.close()
-        print(f"📂 Загружено: {len(queue)} ссылок, {len(vip_links)} VIP")
+        print(f"📂 Загружено: {len(queue)} ссылок в очереди, {len(vip_links)} VIP")
     except Exception as e:
         print(f"⚠️ Ошибка загрузки: {e}")
     sys.stdout.flush()
@@ -144,46 +144,25 @@ def extract_vk_link(text: str) -> Optional[str]:
             return match.group(1)
     return None
 
-def get_content_type(vk_link: str) -> Tuple[str, int, int]:
-    if '_' not in vk_link:
-        return '', 0, 0
-    parts = vk_link.split('_')
-    type_and_owner = parts[0]
-    try:
-        item_id = int(parts[1])
-    except:
-        return '', 0, 0
-    if type_and_owner.startswith('wall'):
-        return 'post', int(type_and_owner[4:]), item_id
-    elif type_and_owner.startswith('photo'):
-        return 'photo', int(type_and_owner[5:]), item_id
-    elif type_and_owner.startswith('video'):
-        return 'video', int(type_and_owner[5:]), item_id
-    elif type_and_owner.startswith('clip'):
-        return 'video', int(type_and_owner[4:]), item_id
-    elif type_and_owner.startswith('audio'):
-        return 'audio', int(type_and_owner[5:]), item_id
-    elif type_and_owner.startswith('market'):
-        return 'market', int(type_and_owner[6:]), item_id
-    elif type_and_owner.startswith('topic'):
-        return 'topic', int(type_and_owner[5:]), item_id
-    return '', 0, 0
-
-def check_user_like_wall_filter(user_id: int, vk_link: str) -> bool:
-    """Проверка через wall.get с filter='likes'"""
+def check_like_wall(user_id: int, vk_link: str) -> bool:
+    """
+    Проверка лайка пользователя на ПОСТ через wall.get с filter='likes'
+    """
     global vk
+    if vk is None:
+        return False
+    
     if not vk_link.startswith('wall'):
-        return True  # Для не-wall пропускаем
+        return True  # Пропускаем не-wall
     
     parts = vk_link.split('_')
     owner_id = int(parts[0][4:])
     item_id = int(parts[1])
     
     code = f'''
-    var user_id = {user_id};
     var owner_id = {owner_id};
     var item_id = {item_id};
-    var result = {{"found": 0}};
+    var result = {{"found": 0, "total": 0}};
     
     var wall = API.wall.get({{
         "owner_id": owner_id,
@@ -192,6 +171,7 @@ def check_user_like_wall_filter(user_id: int, vk_link: str) -> bool:
     }});
     
     if (wall != null && wall.items != null) {{
+        result.total = wall.items.length;
         var i = 0;
         while (i < wall.items.length) {{
             if (wall.items[i].id == item_id) {{
@@ -207,57 +187,16 @@ def check_user_like_wall_filter(user_id: int, vk_link: str) -> bool:
     try:
         rate_limit()
         response = vk.execute(code=code)
-        print(f"   📦 wall.get+filter=likes: {response}")
+        print(f"   📦 Ответ: {response}")
         if isinstance(response, dict):
-            return response.get('found', 0) == 1
+            found = response.get('found', 0)
+            total = response.get('total', 0)
+            print(f"   📊 {'✅ НАЙДЕН' if found == 1 else '❌ НЕ найден'} (всего лайкнутых: {total})")
+            return found == 1
         return False
     except Exception as e:
         print(f"   ❌ Ошибка: {e}")
         return False
-
-def check_like_direct(user_id: int, vk_link: str) -> bool:
-    """Прямой вызов likes.isLiked через execute"""
-    global vk
-    content_type, owner_id, item_id = get_content_type(vk_link)
-    if not content_type:
-        return True
-    
-    code = f'''
-    var result = API.likes.isLiked({{
-        "user_id": {user_id},
-        "type": "{content_type}",
-        "owner_id": {owner_id},
-        "item_id": {item_id}
-    }});
-    return result;
-    '''
-    
-    try:
-        rate_limit()
-        response = vk.execute(code=code)
-        print(f"   📦 likes.isLiked: {response}")
-        if isinstance(response, dict):
-            return response.get('liked', 0) == 1
-        return response == 1
-    except Exception as e:
-        print(f"   ❌ Ошибка: {e}")
-        return False
-
-def check_user_like(user_id: int, vk_link: str) -> bool:
-    """Проверка лайка всеми методами"""
-    # Метод 1: wall.get + filter='likes' (для wall)
-    if vk_link.startswith('wall'):
-        if check_user_like_wall_filter(user_id, vk_link):
-            print(f"   ✅ Лайк найден (wall filter)")
-            return True
-    
-    # Метод 2: прямой likes.isLiked
-    if check_like_direct(user_id, vk_link):
-        print(f"   ✅ Лайк найден (isLiked)")
-        return True
-    
-    print(f"   ❌ Лайк не найден")
-    return False
 
 def can_user_post(user_id: int) -> bool:
     global queue
@@ -367,7 +306,10 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int) -> bool:
 
 def process_message(event):
     global queue
-    print("\n📩 Новое сообщение")
+    print("\n" + "=" * 50)
+    print("📩 НОВОЕ СООБЩЕНИЕ")
+    print("=" * 50)
+    
     try:
         message = event.object.message
         peer_id = message['peer_id']
@@ -377,88 +319,98 @@ def process_message(event):
     except Exception as e:
         print(f"⚠️ Ошибка чтения: {e}")
         return
-    print(f"👤 Пользователь {user_id}: {text[:50] if text else '(пусто)'}")
+    
+    print(f"👤 Пользователь: {user_id}")
+    print(f"💬 Текст: {text[:50] if text else '(пусто)'}")
     sys.stdout.flush()
+    
     if user_id < 0:
         return
+    
+    # VIP-команды
     if text.lower().startswith('!vip') or text.lower().startswith('!delvip'):
         if message_id:
             delete_message(peer_id, message_id)
         handle_vip_commands(text, user_id, peer_id)
         return
+    
     vk_link = extract_vk_link(text)
+    
     if not vk_link:
-        print(f"🗑️ Нет ссылки, удаляем")
+        print(f"🗑️ Нет ссылки — удаляем сообщение")
         if message_id:
             delete_message(peer_id, message_id)
         send_message(peer_id, "🔗 Нужна ссылка на контент ВКонтакте!")
         return
+    
     print(f"✅ Ссылка: {vk_link}")
     
-    # Проверка VIP-лайков
+    # ПРОВЕРКА 1: VIP-лайки (по одному)
     with vip_links_lock:
         if vip_links:
-            print(f"🔍 Проверяем VIP-лайки...")
-            vip_ok = True
-            missing_vip = []
-            for vip in vip_links:
-                has_like = check_user_like(user_id, vip['link'])
+            print(f"\n🔍 ПРОВЕРКА VIP-ЛАЙКОВ ({len(vip_links)} шт.):")
+            for i, vip in enumerate(vip_links, 1):
+                print(f"   [{i}/{len(vip_links)}] VIP: {vip['link']}")
+                has_like = check_like_wall(user_id, vip['link'])
                 if not has_like:
-                    vip_ok = False
-                    missing_vip.append(vip['link'])
-            if not vip_ok:
-                vip_text = "⭐ Поставь лайки на VIP-ссылки:\n\n"
-                for i, link in enumerate(missing_vip, 1):
-                    clickable = make_clickable_link(link)
-                    vip_text += f"{i}. 🔗 {clickable}\n"
-                print(f"❌ VIP-лайки не поставлены!")
-                if message_id:
-                    delete_message(peer_id, message_id)
-                send_message(peer_id, vip_text)
-                return
+                    clickable = make_clickable_link(vip['link'])
+                    print(f"   ❌ НЕТ ЛАЙКА на VIP: {vip['link']}")
+                    if message_id:
+                        delete_message(peer_id, message_id)
+                    send_message(peer_id, f"⭐ Не хватает лайка на VIP-ссылку:\n🔗 {clickable}")
+                    return
+                else:
+                    print(f"   ✅ Лайк есть")
+            print(f"✅ Все VIP-лайки поставлены!")
     
-    # Проверка лайков на предыдущие 10 ссылок
+    # ПРОВЕРКА 2: Лайки на последние 10 ссылок (по одному)
     with queue_lock:
         links_to_check = [item['link'] for item in queue[-10:]]
-    if links_to_check:
-        all_liked = True
-        missing_links = []
-        for link in links_to_check:
-            has_like = check_user_like(user_id, link)
-            if not has_like:
-                all_liked = False
-                missing_links.append(link)
-        if not all_liked:
-            missing_text = "❌ Поставь лайки на эти ссылки:\n\n"
-            for i, link in enumerate(missing_links, 1):
-                clickable = make_clickable_link(link)
-                missing_text += f"{i}. 🔗 {clickable}\n"
-            print(f"❌ Не все лайки поставлены!")
-            if message_id:
-                delete_message(peer_id, message_id)
-            send_message(peer_id, missing_text)
-            return
     
-    # Проверка частоты
+    if links_to_check:
+        print(f"\n🔍 ПРОВЕРКА ЛАЙКОВ НА ОЧЕРЕДЬ ({len(links_to_check)} шт.):")
+        for i, link in enumerate(links_to_check, 1):
+            print(f"   [{i}/{len(links_to_check)}] {link}")
+            has_like = check_like_wall(user_id, link)
+            if not has_like:
+                clickable = make_clickable_link(link)
+                print(f"   ❌ НЕТ ЛАЙКА на: {link}")
+                if message_id:
+                    delete_message(peer_id, message_id)
+                send_message(peer_id, f"❌ Не хватает лайка вот на эту ссылку:\n🔗 {clickable}")
+                return
+            else:
+                print(f"   ✅ Лайк есть")
+        print(f"✅ Все лайки на очередь поставлены!")
+    
+    # ПРОВЕРКА 3: Частота
     if not can_user_post(user_id):
         posts_after = get_posts_after_user(user_id)
         need_to_wait = max(0, 5 - posts_after)
-        print(f"⏳ Пользователь {user_id} должен ждать {need_to_wait} постов")
+        print(f"⏳ Нужно ждать {need_to_wait} постов")
         if message_id:
             delete_message(peer_id, message_id)
         send_message(peer_id, f"⏳ Подожди, нужно {need_to_wait} чужих постов!")
         return
     
-    # Публикуем
+    # ПУБЛИКАЦИЯ
+    print(f"\n✅ ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ — ПУБЛИКУЕМ!")
+    
+    # Удаляем сообщение пользователя
+    if message_id:
+        delete_message(peer_id, message_id)
+    
+    # Добавляем в очередь
     with queue_lock:
         queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now()})
         if len(queue) > MAX_QUEUE_SIZE:
             removed = queue.pop(0)
             print(f"🗑️ Удалена старая ссылка: {removed['link']}")
         save_queue()
+    
     clickable = make_clickable_link(vk_link)
-    print(f"✅ Опубликовано!")
     send_message(peer_id, f"✅ Ссылка опубликована!\n🔗 {clickable}\n📊 В очереди: {len(queue)}")
+    print(f"✅ Опубликовано!")
 
 def main():
     global vk
@@ -475,6 +427,10 @@ def main():
         sys.stdout.flush()
         longpoll = VkBotLongPoll(vk_session, GROUP_ID)
         print("✅ Бот запущен!")
+        print("=" * 60)
+        print("✅ Проверка лайков на ПОСТЫ (wall)")
+        print("✅ VIP-ссылки (24 часа)")
+        print("✅ Очередь: 10 ссылок")
         print("=" * 60)
         sys.stdout.flush()
         for event in longpoll.listen():
