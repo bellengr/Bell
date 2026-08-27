@@ -24,7 +24,12 @@ except ImportError as e:
     raise
 
 # ====================== НАСТРОЙКИ ======================
-TOKEN = "vk1.a.fk-bv0yWt-LlscU3X4HJu5TBp-64kLZNb2_RQLb52FjIUjzydChhhDF_iIdEKBFYUeLlT-Q66jr-ap8ZV4rsICRBBmZBg1YR7sOPjvnVBM92P1GwzxIgGsaONqH2A4hQnLhnC9Ip5bKOA98IclV5jh-r9FFWMI-qmKITZU1ttgBBdi4mJHoj5KW7kPT4-jE9"
+# Токен ГРУППЫ для Long Poll (получение сообщений)
+GROUP_TOKEN = "vk1.a.s5mgEVHWOVgpTPQ2AhN4hYF15Tc6vsHIsmavsZNDFTZkvKB-mwOR-f1aUuQ27AWpc5wfZLZH42iJy74xZDafcBZJwzmupX8OUN8MnlDxZYuHLk5NrJHDwIUuFiDy6S8OTbl0trJEUg77amTmVsgZPypu-EkumFvDiQFIkMt3twuGQD2PpnckpaASfFXLw0HMxp3CbBTZsLy1DEilvoJRbA"
+
+# Пользовательский токен для проверки лайков
+USER_TOKEN = "vk1.a.fk-bv0yWt-LlscU3X4HJu5TBp-64kLZNb2_RQLb52FjIUjzydChhhDF_iIdEKBFYUeLlT-Q66jr-ap8ZV4rsICRBBmZBg1YR7sOPjvnVBM92P1GwzxIgGsaONqH2A4hQnLhnC9Ip5bKOA98IclV5jh-r9FFWMI-qmKITZU1ttgBBdi4mJHoj5KW7kPT4-jE9"
+
 GROUP_ID = 241064421
 # ======================================================
 
@@ -38,7 +43,8 @@ queue = []
 queue_lock = threading.Lock()
 vip_links = []
 vip_links_lock = threading.Lock()
-vk = None
+vk_group = None  # API для группы
+vk_user = None   # API для пользователя (проверка лайков)
 
 def make_clickable_link(vk_link: str) -> str:
     if not vk_link:
@@ -148,12 +154,12 @@ def rate_limit():
     time.sleep(RATE_LIMIT_DELAY)
 
 def is_group_admin(user_id: int) -> bool:
-    global vk
-    if vk is None:
+    global vk_group
+    if vk_group is None:
         return False
     try:
         rate_limit()
-        response = vk.groups.getMembers(
+        response = vk_group.groups.getMembers(
             group_id=GROUP_ID,
             filter='managers',
             count=1000
@@ -163,14 +169,14 @@ def is_group_admin(user_id: int) -> bool:
         return False
 
 def get_chat_owner(peer_id: int) -> Optional[int]:
-    global vk
-    if vk is None:
+    global vk_group
+    if vk_group is None:
         return None
     if peer_id < 2000000000:
         return None
     try:
         rate_limit()
-        response = vk.messages.getConversationsById(
+        response = vk_group.messages.getConversationsById(
             peer_ids=[peer_id],
             extended=1
         )
@@ -237,10 +243,10 @@ def get_content_type(vk_link: str) -> Tuple[str, int, int]:
     return '', 0, 0
 
 def check_like(user_id: int, vk_link: str) -> bool:
-    """Проверка лайка с пользовательским токеном"""
-    global vk
-    if vk is None:
-        print(f"   ❌ API не инициализирован")
+    """Проверка лайка с ИСПОЛЬЗОВАНИЕМ ПОЛЬЗОВАТЕЛЬСКОГО токена"""
+    global vk_user
+    if vk_user is None:
+        print(f"   ❌ Пользовательский API не инициализирован")
         return False
     
     content_type, owner_id, item_id = get_content_type(vk_link)
@@ -251,7 +257,7 @@ def check_like(user_id: int, vk_link: str) -> bool:
     
     try:
         rate_limit()
-        response = vk.likes.isLiked(
+        response = vk_user.likes.isLiked(
             user_id=user_id,
             type=content_type,
             owner_id=owner_id,
@@ -293,12 +299,12 @@ def get_posts_after_user(user_id: int) -> int:
         return len(queue) - last_user_post_index - 1
 
 def send_message(peer_id: int, text: str):
-    global vk
-    if vk is None:
+    global vk_group
+    if vk_group is None:
         return
     try:
         rate_limit()
-        vk.messages.send(
+        vk_group.messages.send(
             peer_id=peer_id,
             message=text,
             random_id=int(time.time() * 1000)
@@ -309,8 +315,8 @@ def send_message(peer_id: int, text: str):
     sys.stdout.flush()
 
 def delete_message(peer_id: int, message_id: int) -> bool:
-    global vk
-    if vk is None:
+    global vk_group
+    if vk_group is None:
         return False
     if not message_id or message_id == 0:
         return False
@@ -318,13 +324,13 @@ def delete_message(peer_id: int, message_id: int) -> bool:
     try:
         rate_limit()
         if peer_id >= 2000000000:
-            vk.messages.delete(
+            vk_group.messages.delete(
                 peer_id=peer_id,
                 cmids=[message_id],
                 delete_for_all=True
             )
         else:
-            vk.messages.delete(
+            vk_group.messages.delete(
                 peer_id=peer_id,
                 message_ids=[message_id],
                 delete_for_all=True
@@ -462,7 +468,7 @@ def process_message(event):
     
     print(f"✅ Ссылка от пользователя {user_id}: {vk_link}")
     
-    # ПРОВЕРКА 1: VIP-лайки
+    # ПРОВЕРКА 1: VIP-лайки (пользовательский токен)
     with vip_links_lock:
         if vip_links:
             print(f"🔍 Проверяем VIP-лайки ({len(vip_links)} ссылок)...")
@@ -540,25 +546,32 @@ def process_message(event):
     send_message(peer_id, f"✅ Ссылка опубликована!\n🔗 {clickable}\n📊 В очереди: {len(queue)}")
 
 def main():
-    global vk
+    global vk_group, vk_user
     
     init_database()
     load_data()
     
     try:
-        print("🔄 Подключение к VK API...")
+        print("🔄 Подключение к VK API (группа)...")
         sys.stdout.flush()
         
-        vk_session = vk_api.VkApi(token=TOKEN)
-        vk = vk_session.get_api()
+        vk_group_session = vk_api.VkApi(token=GROUP_TOKEN)
+        vk_group = vk_group_session.get_api()
         
-        print("✅ VK API подключен (пользовательский токен)")
+        print("✅ Групповой API подключен")
+        sys.stdout.flush()
+        
+        print("🔄 Подключение пользовательского API...")
+        sys.stdout.flush()
+        vk_user_session = vk_api.VkApi(token=USER_TOKEN)
+        vk_user = vk_user_session.get_api()
+        print("✅ Пользовательский API подключен")
         sys.stdout.flush()
         
         print("🔄 Подключение Long Poll...")
         sys.stdout.flush()
         
-        longpoll = VkBotLongPoll(vk_session, GROUP_ID)
+        longpoll = VkBotLongPoll(vk_group_session, GROUP_ID)
         
         print("✅ Бот запущен!")
         print("=" * 60)
