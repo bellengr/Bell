@@ -6,17 +6,15 @@ from datetime import datetime, timedelta
 import threading
 import traceback
 from typing import Optional, List, Tuple
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import json
-import os
 
 print("=" * 60)
-print("🚀 БОТ ЗАПУСКАЕТСЯ (Callback API)...")
+print("🚀 БОТ ЗАПУСКАЕТСЯ (Long Poll)...")
 print("=" * 60)
 sys.stdout.flush()
 
 try:
     import vk_api
+    from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
     from vk_api.exceptions import ApiError
     print("✅ Библиотека vk-api загружена")
     sys.stdout.flush()
@@ -28,8 +26,6 @@ except ImportError as e:
 # ====================== НАСТРОЙКИ ======================
 GROUP_TOKEN = "vk1.a.s5mgEVHWOVgpTPQ2AhN4hYF15Tc6vsHIsmavsZNDFTZkvKB-mwOR-f1aUuQ27AWpc5wfZLZH42iJy74xZDafcBZJwzmupX8OUN8MnlDxZYuHLk5NrJHDwIUuFiDy6S8OTbl0trJEUg77amTmVsgZPypu-EkumFvDiQFIkMt3twuGQD2PpnckpaASfFXLw0HMxp3CbBTZsLy1DEilvoJRbA"
 GROUP_ID = 241064421
-CONFIRMATION_CODE = "efb6cbe5"  # ← НОВЫЙ КОД!
-PORT = int(os.getenv("PORT", 3000))
 # ======================================================
 
 MAX_QUEUE_SIZE = 10
@@ -171,12 +167,12 @@ def extract_vk_link(text: str) -> Optional[str]:
     return None
 
 def check_like_via_execute(user_id: int, vk_link: str) -> bool:
-    """Проверка лайка через execute для всех типов"""
+    """Проверка лайка через execute для всех типов контента"""
     global vk
     if vk is None:
         return False
     
-    # Для wall
+    # Для wall (посты)
     if vk_link.startswith('wall'):
         parts = vk_link.split('_')
         owner_id = int(parts[0][4:])
@@ -195,7 +191,7 @@ def check_like_via_execute(user_id: int, vk_link: str) -> bool:
         return result;
         '''
     
-    # Для photo
+    # Для photo (фото)
     elif vk_link.startswith('photo'):
         parts = vk_link.split('_')
         owner_id = int(parts[0][5:])
@@ -214,7 +210,7 @@ def check_like_via_execute(user_id: int, vk_link: str) -> bool:
         return result;
         '''
     
-    # Для video/clip
+    # Для video/clip (видео и клипы)
     elif vk_link.startswith('video') or vk_link.startswith('clip'):
         if vk_link.startswith('clip'):
             parts = vk_link.split('_')
@@ -237,7 +233,7 @@ def check_like_via_execute(user_id: int, vk_link: str) -> bool:
         return result;
         '''
     
-    # Для market
+    # Для market (товары)
     elif vk_link.startswith('market'):
         parts = vk_link.split('_')
         owner_id = int(parts[0][6:])
@@ -257,6 +253,7 @@ def check_like_via_execute(user_id: int, vk_link: str) -> bool:
         '''
     
     else:
+        # Для неподдерживаемых типов - пропускаем проверку
         return True
     
     try:
@@ -413,10 +410,22 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int) -> bool:
     
     return False
 
-def process_message(peer_id: int, user_id: int, text: str, message_id: int):
+def process_message(event):
     global queue
     
-    print(f"\n📩 Сообщение от {user_id}: {text[:50] if text else '(пусто)'}")
+    print("\n📩 Новое сообщение")
+    
+    try:
+        message = event.object.message
+        peer_id = message['peer_id']
+        user_id = message['from_id']
+        text = message.get('text', '').strip()
+        message_id = message.get('conversation_message_id', message.get('id', 0))
+    except Exception as e:
+        print(f"⚠️ Ошибка чтения: {e}")
+        return
+    
+    print(f"👤 Пользователь {user_id}: {text[:50] if text else '(пусто)'}")
     sys.stdout.flush()
     
     if user_id < 0:
@@ -512,85 +521,39 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int):
     print(f"✅ Опубликовано!")
     send_message(peer_id, f"✅ Ссылка опубликована!\n🔗 {clickable}\n📊 В очереди: {len(queue)}")
 
-class CallbackHandler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        content_length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(content_length)
-        
-        print(f"📥 Получен запрос: {body.decode('utf-8')}", flush=True)
-        
-        try:
-            data = json.loads(body)
-            
-            if data.get('type') == 'confirmation':
-                response_body = CONFIRMATION_CODE.encode('utf-8')
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain; charset=utf-8')
-                self.send_header('Content-Length', str(len(response_body)))
-                self.end_headers()
-                self.wfile.write(response_body)
-                print(f"🔑 Отправлен код: {CONFIRMATION_CODE}", flush=True)
-            
-            elif data.get('type') == 'message_new':
-                message = data.get('object', {}).get('message', {})
-                
-                peer_id = message.get('peer_id', 0)
-                user_id = message.get('from_id', 0)
-                text = message.get('text', '')
-                message_id = message.get('conversation_message_id', message.get('id', 0))
-                
-                thread = threading.Thread(
-                    target=process_message,
-                    args=(peer_id, user_id, text, message_id),
-                    daemon=True
-                )
-                thread.start()
-                
-                response_body = b'ok'
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain; charset=utf-8')
-                self.send_header('Content-Length', str(len(response_body)))
-                self.end_headers()
-                self.wfile.write(response_body)
-            
-            else:
-                response_body = b'ok'
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain; charset=utf-8')
-                self.send_header('Content-Length', str(len(response_body)))
-                self.end_headers()
-                self.wfile.write(response_body)
-                
-        except Exception as e:
-            print(f"❌ Ошибка: {e}", flush=True)
-            response_body = b'ok'
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/plain; charset=utf-8')
-            self.send_header('Content-Length', str(len(response_body)))
-            self.end_headers()
-            self.wfile.write(response_body)
+def main():
+    global vk
     
-    def log_message(self, format, *args):
-        print(f"📝 {format % args}", flush=True)
-
-if __name__ == "__main__":
     init_database()
     load_data()
     
-    print("=" * 60)
-    print("🚀 Бот запущен с Callback API")
-    print(f"📌 ID группы: {GROUP_ID}")
-    print(f"🔑 Код: {CONFIRMATION_CODE}")
-    print(f"📡 Порт: {PORT}")
-    print("=" * 60)
-    sys.stdout.flush()
-    
-    vk_session = vk_api.VkApi(token=GROUP_TOKEN)
-    vk = vk_session.get_api()
-    print("✅ VK API подключен")
-    sys.stdout.flush()
-    
-    server = HTTPServer(('0.0.0.0', PORT), CallbackHandler)
-    print(f"✅ Сервер запущен на 0.0.0.0:{PORT}")
-    sys.stdout.flush()
-    server.serve_forever()
+    try:
+        print("🔄 Подключение к VK API...")
+        sys.stdout.flush()
+        
+        vk_session = vk_api.VkApi(token=GROUP_TOKEN)
+        vk = vk_session.get_api()
+        
+        print("✅ VK API подключен")
+        sys.stdout.flush()
+        
+        print("🔄 Подключение Long Poll...")
+        sys.stdout.flush()
+        
+        longpoll = VkBotLongPoll(vk_session, GROUP_ID)
+        
+        print("✅ Бот запущен!")
+        print("=" * 60)
+        sys.stdout.flush()
+        
+        for event in longpoll.listen():
+            if event.type == VkBotEventType.MESSAGE_NEW:
+                process_message(event)
+                
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        traceback.print_exc()
+        sys.stdout.flush()
+
+if __name__ == "__main__":
+    main()
