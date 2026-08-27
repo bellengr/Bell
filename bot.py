@@ -24,7 +24,7 @@ except ImportError as e:
     raise
 
 # ====================== НАСТРОЙКИ ======================
-TOKEN = "vk1.a.s5mgEVHWOVgpTPQ2AhN4hYF15Tc6vsHIsmavsZNDFTZkvKB-mwOR-f1aUuQ27AWpc5wfZLZH42iJy74xZDafcBZJwzmupX8OUN8MnlDxZYuHLk5NrJHDwIUuFiDy6S8OTbl0trJEUg77amTmVsgZPypu-EkumFvDiQFIkMt3twuGQD2PpnckpaASfFXLw0HMxp3CbBTZsLy1DEilvoJRbA"  # Токен группы
+TOKEN = "vk1.a.fk-bv0yWt-LlscU3X4HJu5TBp-64kLZNb2_RQLb52FjIUjzydChhhDF_iIdEKBFYUeLlT-Q66jr-ap8ZV4rsICRBBmZBg1YR7sOPjvnVBM92P1GwzxIgGsaONqH2A4hQnLhnC9Ip5bKOA98IclV5jh-r9FFWMI-qmKITZU1ttgBBdi4mJHoj5KW7kPT4-jE9"
 GROUP_ID = 241064421
 # ======================================================
 
@@ -208,7 +208,6 @@ def extract_vk_link(text: str) -> Optional[str]:
     return None
 
 def get_content_type(vk_link: str) -> Tuple[str, int, int]:
-    """Определение типа контента"""
     if '_' not in vk_link:
         return '', 0, 0
     
@@ -237,177 +236,42 @@ def get_content_type(vk_link: str) -> Tuple[str, int, int]:
     
     return '', 0, 0
 
-# ====================== МЕТОДЫ ПРОВЕРКИ ЛАЙКОВ ======================
-
-def check_like_for_wall(user_id: int, vk_link: str) -> bool:
-    """Проверка лайка для wall (постов)"""
-    global vk
-    parts = vk_link.split('_')
-    owner_id = int(parts[0][4:])
-    item_id = int(parts[1])
-    
-    # Метод 1: wall.getById
-    try:
-        rate_limit()
-        response = vk.wall.getById(
-            posts=[f"{owner_id}_{item_id}"],
-            extended=0
-        )
-        if response and len(response) > 0:
-            likes = response[0].get('likes', {})
-            user_likes = likes.get('user_likes', 0)
-            print(f"   wall.getById: user_likes={user_likes}")
-            return user_likes == 1
-    except Exception as e:
-        print(f"   wall.getById ошибка: {e}")
-    
-    return False
-
-def check_like_for_photo(user_id: int, vk_link: str) -> bool:
-    """Проверка лайка для фото"""
-    global vk
-    parts = vk_link.split('_')
-    owner_id = int(parts[0][5:])
-    item_id = int(parts[1])
-    
-    # Метод: photos.getById
-    try:
-        rate_limit()
-        response = vk.photos.getById(
-            photos=[f"{owner_id}_{item_id}"]
-        )
-        if response and len(response) > 0:
-            likes = response[0].get('likes', {})
-            user_likes = likes.get('user_likes', 0)
-            print(f"   photos.getById: user_likes={user_likes}")
-            return user_likes == 1
-    except Exception as e:
-        print(f"   photos.getById ошибка: {e}")
-    
-    return False
-
-def check_like_for_video(user_id: int, vk_link: str) -> bool:
-    """Проверка лайка для видео (включая клипы)"""
-    global vk
-    parts = vk_link.split('_')
-    
-    # Для clip или video
-    if vk_link.startswith('clip'):
-        owner_id = int(parts[0][4:])
-    else:  # video
-        owner_id = int(parts[0][5:])
-    
-    item_id = int(parts[1])
-    
-    # Метод: video.get
-    try:
-        rate_limit()
-        response = vk.video.get(
-            videos=[f"{owner_id}_{item_id}"]
-        )
-        if response and len(response) > 0:
-            likes = response[0].get('likes', {})
-            user_likes = likes.get('user_likes', 0)
-            print(f"   video.get: user_likes={user_likes}")
-            return user_likes == 1
-    except Exception as e:
-        print(f"   video.get ошибка: {e}")
-    
-    return False
-
-def check_like_for_audio(user_id: int, vk_link: str) -> bool:
-    """Проверка лайка для аудио"""
-    global vk
-    parts = vk_link.split('_')
-    owner_id = int(parts[0][5:])
-    item_id = int(parts[1])
-    
-    # Метод: audio.getById
-    try:
-        rate_limit()
-        response = vk.audio.getById(
-            audios=[f"{owner_id}_{item_id}"]
-        )
-        if response and len(response) > 0:
-            # Аудио не имеет user_likes, проверяем через likes.isLiked
-            try:
-                rate_limit()
-                like_check = vk.likes.isLiked(
-                    user_id=user_id,
-                    type='audio',
-                    owner_id=owner_id,
-                    item_id=item_id
-                )
-                if isinstance(like_check, dict):
-                    liked = like_check.get('liked', 0)
-                    print(f"   audio likes.isLiked: liked={liked}")
-                    return liked == 1
-            except:
-                pass
-    except Exception as e:
-        print(f"   audio.getById ошибка: {e}")
-    
-    return False
-
-def check_like_for_market(user_id: int, vk_link: str) -> bool:
-    """Проверка лайка для товаров"""
-    global vk
-    parts = vk_link.split('_')
-    owner_id = int(parts[0][6:])
-    item_id = int(parts[1])
-    
-    # Метод: market.getById
-    try:
-        rate_limit()
-        response = vk.market.getById(
-            item_ids=[f"{owner_id}_{item_id}"]
-        )
-        if response and len(response) > 0:
-            likes = response[0].get('likes', {})
-            user_likes = likes.get('user_likes', 0)
-            print(f"   market.getById: user_likes={user_likes}")
-            return user_likes == 1
-    except Exception as e:
-        print(f"   market.getById ошибка: {e}")
-    
-    return False
-
-def check_like_for_topic(user_id: int, vk_link: str) -> bool:
-    """Проверка лайка для обсуждений"""
-    global vk
-    parts = vk_link.split('_')
-    owner_id = int(parts[0][5:])
-    item_id = int(parts[1])
-    
-    # Обсуждения не поддерживают лайки напрямую
-    # Пропускаем проверку
-    print(f"   topic: обсуждения не поддерживают лайки")
-    return True
-
 def check_like(user_id: int, vk_link: str) -> bool:
-    """Проверка лайка в зависимости от типа контента"""
-    print(f"   🔍 Проверяем лайк на {vk_link}...")
-    
-    # Определяем тип контента
-    if vk_link.startswith('wall'):
-        return check_like_for_wall(user_id, vk_link)
-    elif vk_link.startswith('photo'):
-        return check_like_for_photo(user_id, vk_link)
-    elif vk_link.startswith('video'):
-        return check_like_for_video(user_id, vk_link)
-    elif vk_link.startswith('clip'):
-        return check_like_for_video(user_id, vk_link)
-    elif vk_link.startswith('audio'):
-        return check_like_for_audio(user_id, vk_link)
-    elif vk_link.startswith('market'):
-        return check_like_for_market(user_id, vk_link)
-    elif vk_link.startswith('topic'):
-        return check_like_for_topic(user_id, vk_link)
-    else:
-        print(f"   ❌ Неподдерживаемый тип: {vk_link}")
+    """Проверка лайка с пользовательским токеном"""
+    global vk
+    if vk is None:
+        print(f"   ❌ API не инициализирован")
         return False
-
-# ====================== ОСНОВНЫЕ ФУНКЦИИ ======================
+    
+    content_type, owner_id, item_id = get_content_type(vk_link)
+    
+    if not content_type or owner_id == 0 or item_id == 0:
+        print(f"   ❌ Не удалось определить тип: {vk_link}")
+        return False
+    
+    try:
+        rate_limit()
+        response = vk.likes.isLiked(
+            user_id=user_id,
+            type=content_type,
+            owner_id=owner_id,
+            item_id=item_id
+        )
+        
+        if isinstance(response, dict):
+            liked = response.get('liked', 0)
+            print(f"   🔍 {vk_link}: liked={liked}")
+            return liked == 1
+        else:
+            print(f"   🔍 {vk_link}: {response}")
+            return response == 1
+            
+    except ApiError as e:
+        print(f"   ❌ API ошибка: {e}")
+        return False
+    except Exception as e:
+        print(f"   ❌ Ошибка: {e}")
+        return False
 
 def can_user_post(user_id: int) -> bool:
     global queue
@@ -688,7 +552,7 @@ def main():
         vk_session = vk_api.VkApi(token=TOKEN)
         vk = vk_session.get_api()
         
-        print("✅ VK API подключен")
+        print("✅ VK API подключен (пользовательский токен)")
         sys.stdout.flush()
         
         print("🔄 Подключение Long Poll...")
