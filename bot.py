@@ -166,8 +166,8 @@ def extract_vk_link(text: str) -> Optional[str]:
             return match.group(1)
     return None
 
-def check_like_via_execute(user_id: int, vk_link: str) -> bool:
-    """Проверка лайка через execute для всех типов контента"""
+def check_like_via_execute(vk_link: str) -> bool:
+    """Проверка лайка через execute БЕЗ try/catch"""
     global vk
     if vk is None:
         return False
@@ -178,39 +178,34 @@ def check_like_via_execute(user_id: int, vk_link: str) -> bool:
         owner_id = int(parts[0][4:])
         item_id = int(parts[1])
         
+        # VK Script без try/catch
         code = f'''
-        var result = {{"liked": 0}};
-        try {{
-            var post = API.wall.getById({{
-                "posts": "{owner_id}_{item_id}"
-            }});
-            if (post && post.length > 0) {{
-                result.liked = post[0].likes.user_likes;
-            }}
-        }} catch (e) {{}}
-        return result;
+        var post = API.wall.getById({{
+            "posts": "{owner_id}_{item_id}"
+        }});
+        if (post && post.length > 0) {{
+            return {{"liked": post[0].likes.user_likes}};
+        }}
+        return {{"liked": 0}};
         '''
     
-    # Для photo (фото)
+    # Для photo
     elif vk_link.startswith('photo'):
         parts = vk_link.split('_')
         owner_id = int(parts[0][5:])
         item_id = int(parts[1])
         
         code = f'''
-        var result = {{"liked": 0}};
-        try {{
-            var photo = API.photos.getById({{
-                "photos": "{owner_id}_{item_id}"
-            }});
-            if (photo && photo.length > 0) {{
-                result.liked = photo[0].likes.user_likes;
-            }}
-        }} catch (e) {{}}
-        return result;
+        var photo = API.photos.getById({{
+            "photos": "{owner_id}_{item_id}"
+        }});
+        if (photo && photo.length > 0) {{
+            return {{"liked": photo[0].likes.user_likes}};
+        }}
+        return {{"liked": 0}};
         '''
     
-    # Для video/clip (видео и клипы)
+    # Для video/clip
     elif vk_link.startswith('video') or vk_link.startswith('clip'):
         if vk_link.startswith('clip'):
             parts = vk_link.split('_')
@@ -221,39 +216,32 @@ def check_like_via_execute(user_id: int, vk_link: str) -> bool:
         item_id = int(parts[1])
         
         code = f'''
-        var result = {{"liked": 0}};
-        try {{
-            var video = API.video.get({{
-                "videos": "{owner_id}_{item_id}"
-            }});
-            if (video && video.items && video.items.length > 0) {{
-                result.liked = video.items[0].likes.user_likes;
-            }}
-        }} catch (e) {{}}
-        return result;
+        var video = API.video.get({{
+            "videos": "{owner_id}_{item_id}"
+        }});
+        if (video && video.items && video.items.length > 0) {{
+            return {{"liked": video.items[0].likes.user_likes}};
+        }}
+        return {{"liked": 0}};
         '''
     
-    # Для market (товары)
+    # Для market
     elif vk_link.startswith('market'):
         parts = vk_link.split('_')
         owner_id = int(parts[0][6:])
         item_id = int(parts[1])
         
         code = f'''
-        var result = {{"liked": 0}};
-        try {{
-            var item = API.market.getById({{
-                "item_ids": "{owner_id}_{item_id}"
-            }});
-            if (item && item.items && item.items.length > 0) {{
-                result.liked = item.items[0].likes.user_likes;
-            }}
-        }} catch (e) {{}}
-        return result;
+        var item = API.market.getById({{
+            "item_ids": "{owner_id}_{item_id}"
+        }});
+        if (item && item.items && item.items.length > 0) {{
+            return {{"liked": item.items[0].likes.user_likes}};
+        }}
+        return {{"liked": 0}};
         '''
     
     else:
-        # Для неподдерживаемых типов - пропускаем проверку
         return True
     
     try:
@@ -451,10 +439,11 @@ def process_message(event):
     # Проверка VIP-лайков
     with vip_links_lock:
         if vip_links:
+            print(f"🔍 Проверяем VIP-лайки...")
             vip_ok = True
             missing_vip = []
             for vip in vip_links:
-                has_like = check_like_via_execute(user_id, vip['link'])
+                has_like = check_like_via_execute(vip['link'])
                 if not has_like:
                     vip_ok = False
                     missing_vip.append(vip['link'])
@@ -470,6 +459,7 @@ def process_message(event):
                     delete_message(peer_id, message_id)
                 send_message(peer_id, vip_text)
                 return
+            print(f"✅ Все VIP-лайки поставлены!")
     
     # Проверка лайков на предыдущие ссылки
     with queue_lock:
@@ -479,7 +469,7 @@ def process_message(event):
         all_liked = True
         missing_links = []
         for link in links_to_check:
-            has_like = check_like_via_execute(user_id, link)
+            has_like = check_like_via_execute(link)
             if not has_like:
                 all_liked = False
                 missing_links.append(link)
@@ -495,6 +485,7 @@ def process_message(event):
                 delete_message(peer_id, message_id)
             send_message(peer_id, missing_text)
             return
+        print(f"✅ Все лайки поставлены!")
     
     # Проверка частоты
     if not can_user_post(user_id):
