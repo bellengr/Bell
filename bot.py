@@ -169,36 +169,10 @@ def get_content_type(vk_link: str) -> Tuple[str, int, int]:
         return 'topic', int(type_and_owner[5:]), item_id
     return '', 0, 0
 
-def check_like_execute_isliked(user_id: int, vk_link: str) -> bool:
-    """Метод: execute + likes.isLiked"""
+def check_user_like(user_id: int, vk_link: str) -> bool:
+    """Проверка лайка пользователя через execute + likes.getList"""
     global vk
-    content_type, owner_id, item_id = get_content_type(vk_link)
-    if not content_type:
-        return True
     
-    code = f'''
-    return API.likes.isLiked({{
-        "user_id": {user_id},
-        "type": "{content_type}",
-        "owner_id": {owner_id},
-        "item_id": {item_id}
-    }});
-    '''
-    
-    try:
-        rate_limit()
-        response = vk.execute(code=code)
-        print(f"   📦 execute+isLiked: {response}")
-        if isinstance(response, dict):
-            return response.get('liked', 0) == 1
-        return response == 1
-    except Exception as e:
-        print(f"   ❌ execute+isLiked ошибка: {e}")
-        return False
-
-def check_like_execute_getlist(user_id: int, vk_link: str) -> bool:
-    """Метод: execute + likes.getList с поиском пользователя"""
-    global vk
     content_type, owner_id, item_id = get_content_type(vk_link)
     if not content_type:
         return True
@@ -209,41 +183,45 @@ def check_like_execute_getlist(user_id: int, vk_link: str) -> bool:
         "type": "{content_type}",
         "owner_id": {owner_id},
         "item_id": {item_id},
-        "count": 1000
+        "count": 100
     }});
+    
     var found = 0;
-    var i = 0;
-    while (i < likes.items.length) {{
-        if (likes.items[i] == user_id) {{
-            found = 1;
+    var total = 0;
+    
+    if (likes != null) {{
+        if (likes.count != null) {{
+            total = likes.count;
         }}
-        i = i + 1;
+        if (likes.items != null) {{
+            var i = 0;
+            while (i < likes.items.length) {{
+                if (likes.items[i] == user_id) {{
+                    found = 1;
+                }}
+                i = i + 1;
+            }}
+        }}
     }}
-    return {{"found": found, "total": likes.count}};
+    
+    return {{"found": found, "total": total, "has_items": likes.items != null}};
     '''
     
     try:
         rate_limit()
         response = vk.execute(code=code)
-        print(f"   📦 execute+getList: {response}")
+        print(f"   📦 Ответ: {response}")
+        
         if isinstance(response, dict):
-            return response.get('found', 0) == 1
+            found = response.get('found', 0)
+            total = response.get('total', 0)
+            has_items = response.get('has_items', False)
+            print(f"   📊 Найден: {found}, Всего: {total}, Items: {has_items}")
+            return found == 1
         return False
     except Exception as e:
-        print(f"   ❌ execute+getList ошибка: {e}")
+        print(f"   ❌ Ошибка: {e}")
         return False
-
-def check_user_like(user_id: int, vk_link: str) -> bool:
-    """Проверка лайка пользователя всеми методами"""
-    # Метод 1: execute + likes.isLiked
-    if check_like_execute_isliked(user_id, vk_link):
-        return True
-    
-    # Метод 2: execute + likes.getList
-    if check_like_execute_getlist(user_id, vk_link):
-        return True
-    
-    return False
 
 def can_user_post(user_id: int) -> bool:
     global queue
