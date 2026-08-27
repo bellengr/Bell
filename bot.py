@@ -169,59 +169,95 @@ def get_content_type(vk_link: str) -> Tuple[str, int, int]:
         return 'topic', int(type_and_owner[5:]), item_id
     return '', 0, 0
 
-def check_user_like(user_id: int, vk_link: str) -> bool:
-    """Проверка лайка пользователя через execute + likes.getList"""
+def check_user_like_wall_filter(user_id: int, vk_link: str) -> bool:
+    """Проверка через wall.get с filter='likes'"""
     global vk
+    if not vk_link.startswith('wall'):
+        return True  # Для не-wall пропускаем
     
-    content_type, owner_id, item_id = get_content_type(vk_link)
-    if not content_type:
-        return True
+    parts = vk_link.split('_')
+    owner_id = int(parts[0][4:])
+    item_id = int(parts[1])
     
     code = f'''
     var user_id = {user_id};
-    var likes = API.likes.getList({{
-        "type": "{content_type}",
-        "owner_id": {owner_id},
-        "item_id": {item_id},
-        "count": 100
+    var owner_id = {owner_id};
+    var item_id = {item_id};
+    var result = {{"found": 0}};
+    
+    var wall = API.wall.get({{
+        "owner_id": owner_id,
+        "count": 100,
+        "filter": "likes"
     }});
     
-    var found = 0;
-    var total = 0;
-    
-    if (likes != null) {{
-        if (likes.count != null) {{
-            total = likes.count;
-        }}
-        if (likes.items != null) {{
-            var i = 0;
-            while (i < likes.items.length) {{
-                if (likes.items[i] == user_id) {{
-                    found = 1;
-                }}
-                i = i + 1;
+    if (wall != null && wall.items != null) {{
+        var i = 0;
+        while (i < wall.items.length) {{
+            if (wall.items[i].id == item_id) {{
+                result.found = 1;
             }}
+            i = i + 1;
         }}
     }}
     
-    return {{"found": found, "total": total, "has_items": likes.items != null}};
+    return result;
     '''
     
     try:
         rate_limit()
         response = vk.execute(code=code)
-        print(f"   📦 Ответ: {response}")
-        
+        print(f"   📦 wall.get+filter=likes: {response}")
         if isinstance(response, dict):
-            found = response.get('found', 0)
-            total = response.get('total', 0)
-            has_items = response.get('has_items', False)
-            print(f"   📊 Найден: {found}, Всего: {total}, Items: {has_items}")
-            return found == 1
+            return response.get('found', 0) == 1
         return False
     except Exception as e:
         print(f"   ❌ Ошибка: {e}")
         return False
+
+def check_like_direct(user_id: int, vk_link: str) -> bool:
+    """Прямой вызов likes.isLiked через execute"""
+    global vk
+    content_type, owner_id, item_id = get_content_type(vk_link)
+    if not content_type:
+        return True
+    
+    code = f'''
+    var result = API.likes.isLiked({{
+        "user_id": {user_id},
+        "type": "{content_type}",
+        "owner_id": {owner_id},
+        "item_id": {item_id}
+    }});
+    return result;
+    '''
+    
+    try:
+        rate_limit()
+        response = vk.execute(code=code)
+        print(f"   📦 likes.isLiked: {response}")
+        if isinstance(response, dict):
+            return response.get('liked', 0) == 1
+        return response == 1
+    except Exception as e:
+        print(f"   ❌ Ошибка: {e}")
+        return False
+
+def check_user_like(user_id: int, vk_link: str) -> bool:
+    """Проверка лайка всеми методами"""
+    # Метод 1: wall.get + filter='likes' (для wall)
+    if vk_link.startswith('wall'):
+        if check_user_like_wall_filter(user_id, vk_link):
+            print(f"   ✅ Лайк найден (wall filter)")
+            return True
+    
+    # Метод 2: прямой likes.isLiked
+    if check_like_direct(user_id, vk_link):
+        print(f"   ✅ Лайк найден (isLiked)")
+        return True
+    
+    print(f"   ❌ Лайк не найден")
+    return False
 
 def can_user_post(user_id: int) -> bool:
     global queue
