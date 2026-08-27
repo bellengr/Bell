@@ -38,10 +38,9 @@ queue = []
 queue_lock = threading.Lock()
 vip_links = []
 vip_links_lock = threading.Lock()
-vk = None  # Глобальная переменная для API
+vk = None
 
 def init_database():
-    """Инициализация базы данных"""
     try:
         conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         cursor = conn.cursor()
@@ -72,13 +71,11 @@ def init_database():
     sys.stdout.flush()
 
 def load_data():
-    """Загрузка данных из БД"""
     global queue, vip_links
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         
-        # Загружаем очередь
         cursor.execute('SELECT link, user_id, timestamp FROM queue ORDER BY id DESC LIMIT ?', (MAX_QUEUE_SIZE,))
         rows = cursor.fetchall()
         queue = []
@@ -89,7 +86,6 @@ def load_data():
                 'timestamp': datetime.fromisoformat(row[2])
             })
         
-        # Загружаем VIP-ссылки
         cursor.execute('SELECT link, added_by, expires_at FROM vip_links WHERE expires_at > ?', 
                       (datetime.now().isoformat(),))
         vip_rows = cursor.fetchall()
@@ -108,7 +104,6 @@ def load_data():
     sys.stdout.flush()
 
 def save_queue():
-    """Сохранение очереди"""
     global queue
     try:
         conn = sqlite3.connect(DB_FILE)
@@ -125,7 +120,6 @@ def save_queue():
         print(f"⚠️ Ошибка сохранения очереди: {e}")
 
 def save_vip_links():
-    """Сохранение VIP-ссылок"""
     global vip_links
     try:
         conn = sqlite3.connect(DB_FILE)
@@ -142,11 +136,9 @@ def save_vip_links():
         print(f"⚠️ Ошибка сохранения VIP: {e}")
 
 def rate_limit():
-    """Ограничение частоты запросов"""
     time.sleep(RATE_LIMIT_DELAY)
 
 def is_group_admin(user_id: int) -> bool:
-    """Проверка админа группы"""
     global vk
     if vk is None:
         return False
@@ -162,7 +154,6 @@ def is_group_admin(user_id: int) -> bool:
         return False
 
 def get_chat_owner(peer_id: int) -> Optional[int]:
-    """Получение владельца чата"""
     global vk
     if vk is None:
         return None
@@ -182,14 +173,12 @@ def get_chat_owner(peer_id: int) -> Optional[int]:
         return None
 
 def is_admin_or_owner(peer_id: int, user_id: int) -> bool:
-    """Проверка прав"""
     if is_group_admin(user_id):
         return True
     owner_id = get_chat_owner(peer_id)
     return owner_id == user_id
 
 def extract_vk_link(text: str) -> Optional[str]:
-    """Извлечение ссылки"""
     if not text:
         return None
     
@@ -210,7 +199,6 @@ def extract_vk_link(text: str) -> Optional[str]:
     return None
 
 def get_content_type(vk_link: str) -> Tuple[str, int, int]:
-    """Определение типа контента"""
     if '_' not in vk_link:
         return '', 0, 0
     
@@ -240,7 +228,6 @@ def get_content_type(vk_link: str) -> Tuple[str, int, int]:
     return '', 0, 0
 
 def check_like(user_id: int, vk_link: str) -> bool:
-    """Проверка лайка"""
     global vk
     if vk is None:
         return True
@@ -266,28 +253,38 @@ def check_like(user_id: int, vk_link: str) -> bool:
         return True
 
 def can_user_post(user_id: int) -> bool:
-    """Проверка частоты публикаций"""
+    """Проверка: прошло ли 5 чужих ссылок после последней публикации пользователя"""
     global queue
     with queue_lock:
-        user_posts = [i for i, item in enumerate(queue) if item['user_id'] == user_id]
-        if not user_posts:
+        # Находим индексы всех постов пользователя
+        user_posts_indices = [i for i, item in enumerate(queue) if item['user_id'] == user_id]
+        
+        # Если пользователь никогда не публиковал - можно
+        if not user_posts_indices:
             return True
-        last_post_index = user_posts[-1]
-        posts_after = len(queue) - last_post_index - 1
+        
+        # Находим последний пост пользователя
+        last_user_post_index = user_posts_indices[-1]
+        
+        # Считаем, сколько постов после его последнего
+        posts_after = len(queue) - last_user_post_index - 1
+        
+        # Можно публиковать, если после его поста прошло 5 чужих
         return posts_after >= 5
 
 def get_posts_after_user(user_id: int) -> int:
-    """Количество постов после пользователя"""
+    """Количество постов после последнего поста пользователя"""
     global queue
     with queue_lock:
-        user_posts = [i for i, item in enumerate(queue) if item['user_id'] == user_id]
-        if not user_posts:
+        user_posts_indices = [i for i, item in enumerate(queue) if item['user_id'] == user_id]
+        
+        if not user_posts_indices:
             return 0
-        last_post_index = user_posts[-1]
-        return len(queue) - last_post_index - 1
+        
+        last_user_post_index = user_posts_indices[-1]
+        return len(queue) - last_user_post_index - 1
 
 def send_message(peer_id: int, text: str):
-    """Отправка сообщения"""
     global vk
     if vk is None:
         return
@@ -304,7 +301,6 @@ def send_message(peer_id: int, text: str):
     sys.stdout.flush()
 
 def delete_message(peer_id: int, message_id: int) -> bool:
-    """Удаление сообщения"""
     global vk
     if vk is None:
         return False
@@ -332,7 +328,6 @@ def delete_message(peer_id: int, message_id: int) -> bool:
         return False
 
 def handle_vip_commands(text: str, user_id: int, peer_id: int) -> bool:
-    """Обработка VIP-команд"""
     global vip_links
     
     # !vip - добавить VIP-ссылку
@@ -432,7 +427,7 @@ def process_message(event):
         print(f"⚠️ Ошибка чтения: {e}")
         return
     
-    print(f"👤 {user_id}: {text[:50] if text else '(пусто)'}")
+    print(f"👤 Пользователь {user_id}: {text[:50] if text else '(пусто)'}")
     sys.stdout.flush()
     
     # Игнорируем ботов
@@ -455,60 +450,69 @@ def process_message(event):
     # Если нет ссылки
     if not vk_link:
         if is_admin:
-            print(f"👑 Админ/владелец, сообщение без ссылки не удаляем")
+            print(f"👑 Админ {user_id}, сообщение без ссылки не удаляем")
             return
         
-        print(f"🗑️ Нет ссылки, удаляем")
+        print(f"🗑️ Нет ссылки, удаляем сообщение пользователя {user_id}")
         if message_id:
             delete_message(peer_id, message_id)
         send_message(peer_id, "🔗 Нужна ссылка на контент ВКонтакте!")
         return
     
     # Есть ссылка - обрабатываем для всех
-    print(f"✅ Ссылка: {vk_link}")
+    print(f"✅ Ссылка от пользователя {user_id}: {vk_link}")
     
-    # Проверяем VIP-лайки
+    # ПРОВЕРКА 1: VIP-лайки
     with vip_links_lock:
         if vip_links:
+            print(f"🔍 Проверяем VIP-лайки ({len(vip_links)} ссылок)...")
             vip_ok = True
+            missing_vip = []
             for vip in vip_links:
                 if not check_like(user_id, vip['link']):
                     vip_ok = False
-                    break
+                    missing_vip.append(vip['link'])
             
             if not vip_ok:
-                print(f"❌ VIP-лайки не поставлены")
+                vip_text = "\n".join([f"⭐ {link}" for link in missing_vip])
+                print(f"❌ VIP-лайки не поставлены: {missing_vip}")
                 if message_id:
                     delete_message(peer_id, message_id)
-                send_message(peer_id, "⭐ Поставь лайки на все VIP-ссылки!")
+                send_message(peer_id, f"⭐ Поставь лайки на VIP-ссылки:\n{vip_text}")
                 return
     
-    # Проверяем лайки на предыдущие ссылки
-    all_liked = True
+    # ПРОВЕРКА 2: Лайки на предыдущие 10 ссылок
     with queue_lock:
-        for item in queue[-10:]:
-            if not check_like(user_id, item['link']):
+        links_to_check = [item['link'] for item in queue[-10:]]
+    
+    if links_to_check:
+        print(f"🔍 Проверяем лайки на {len(links_to_check)} предыдущих ссылок...")
+        all_liked = True
+        missing_links = []
+        for link in links_to_check:
+            if not check_like(user_id, link):
                 all_liked = False
-                break
+                missing_links.append(link)
+        
+        if not all_liked:
+            missing_text = "\n".join([f"📌 {link}" for link in missing_links])
+            print(f"❌ Не все лайки поставлены: {missing_links}")
+            if message_id:
+                delete_message(peer_id, message_id)
+            send_message(peer_id, f"❌ Поставь лайки на эти ссылки:\n{missing_text}")
+            return
     
-    if not all_liked:
-        print(f"❌ Не все лайки")
-        if message_id:
-            delete_message(peer_id, message_id)
-        send_message(peer_id, "❌ Поставь лайки на предыдущие ссылки!")
-        return
-    
-    # Проверяем частоту
+    # ПРОВЕРКА 3: Частота публикаций
     if not can_user_post(user_id):
         posts_after = get_posts_after_user(user_id)
         need_to_wait = max(0, 5 - posts_after)
-        print(f"⏳ Нужно ждать {need_to_wait} постов")
+        print(f"⏳ Пользователь {user_id} должен ждать {need_to_wait} постов")
         if message_id:
             delete_message(peer_id, message_id)
         send_message(peer_id, f"⏳ Подожди, нужно {need_to_wait} чужих постов!")
         return
     
-    # Публикуем
+    # ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ - ПУБЛИКУЕМ
     with queue_lock:
         queue.append({
             'link': vk_link,
@@ -519,11 +523,10 @@ def process_message(event):
             queue = queue[-MAX_QUEUE_SIZE:]
         save_queue()
     
-    print(f"✅ Опубликовано!")
+    print(f"✅ Опубликовано пользователем {user_id}!")
     send_message(peer_id, f"✅ Ссылка {vk_link} опубликована!\n📊 В очереди: {len(queue)}")
 
 def main():
-    """Основная функция"""
     global vk
     
     init_database()
@@ -542,10 +545,6 @@ def main():
         longpoll = VkBotLongPoll(vk_session, GROUP_ID)
         
         print("✅ Бот запущен!")
-        print("=" * 60)
-        print(f"📌 ID группы: {GROUP_ID}")
-        print(f"📌 Максимальный размер очереди: {MAX_QUEUE_SIZE}")
-        print(f"⭐ Активных VIP-ссылок: {len(vip_links)}")
         print("=" * 60)
         sys.stdout.flush()
         
