@@ -2,21 +2,19 @@ import sys
 import re
 import time
 import sqlite3
-import json
-import os
 from datetime import datetime, timedelta
 import threading
 import traceback
 from typing import Optional, List, Tuple
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
 print("=" * 60)
-print("🚀 БОТ ЗАПУСКАЕТСЯ (Callback API + User Token)...")
+print("🚀 БОТ ЗАПУСКАЕТСЯ (BotHost + Long Poll + Лайки)...")
 print("=" * 60)
 sys.stdout.flush()
 
 try:
     import vk_api
+    from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
     from vk_api.exceptions import ApiError
     print("✅ Библиотека vk-api загружена")
     sys.stdout.flush()
@@ -26,16 +24,13 @@ except ImportError as e:
     raise
 
 # ====================== НАСТРОЙКИ ======================
-# Групповой токен (для Callback API)
-GROUP_TOKEN = "vk1.a.yQ0EmzxYEcYJEoDfw_Fv3XxltfsHJkUWWkWJQfWe65HY_sWy5-4mufFdSk_VONZ6V5jrHsljtWMZm_UnKKsOIp7uhtMdSOCR-r0Qf8S3B5sYFMtgk2hBdo4IV_hgIzIDcJx8ZzSdEEBPC4cmMnIxrxBgtSUzw0x2xdydHTh5bsmhDaOWbRpo73wrT_bH7gbGLcpSv2v1S05IJnCsD5UrKw"
+# Групповой токен (для Long Poll)
+GROUP_TOKEN = "vk1.a.5qm5-BTRZRJwz4_MQekr5_u4GxRq7VnW3QOIvtkgTfr-qygqi5_IrjLwlM9HkVnEh3kCGm_zLaw-BwFRgZ_3xsJAgeWJwSQQ3-5pageEgfPdK35TElpGfgjuF0IyKimfNvyBW4GfqI0EvBmzFDezi3SbFGcv-E_YHoQbCVRG2gxEW55BsVSl1epMYwakeLstp9YQy6jT5uFUXUMxtGlSLQ"
 
-# Пользовательский токен (для проверки лайков)
-USER_TOKEN = "vk1.a.LAI_7-_1AYdXEdkeN_nWBfoybK5BnZk8MyL2ZBsTYOtM9lepynwLOtw4TVs2_7BudtG7cWJzTTkbroa5L6kIiTe_5ea1e58AEo30pzEPXITix6spiZOl_YUpAI2JksekSSfiajJ49OaA-4frRN9xf0zG7vlVjF_s9D4zOOlciye97YWSoX31sZBVbLvBVbOh79K5vYOQaUN-ZVBjU-abhg"
+# Пользовательский токен (для проверки лайков) — привязан к IP Новосибирска
+USER_TOKEN = "vk1.a.7OcTzOvjiT6PEeqip2NMo94Yh9FXPISldRsNW_9HfIqT4Cz6dMB2vN8orqxrraWK2E9UJ4AKfRpB16hd_6EjDeck2ebT8m2MAjueIVWeeP0ANst-Dhqvq6q1RfQaX0J9fUtD4e3G4byEmoVIs_z3ykb1zBv2X9X3ng28hYDS-kl0DZdLmjhykP3pcOaAJ5CM"
 
 GROUP_ID = 241064421
-GROUP_LINK = "https://vk.ru/bellbotgr"
-CONFIRMATION_CODE = "b4f9f4a0"
-PORT = int(os.getenv("PORT", 3000))
 ADMIN_IDS = [447457340]
 # ======================================================
 
@@ -49,11 +44,8 @@ queue_lock = threading.Lock()
 vip_links = []
 vip_links_lock = threading.Lock()
 
-vk_group = None  # API группы
+vk_group = None  # API группы (Long Poll, отправка)
 vk_user = None   # API пользователя (проверка лайков)
-
-greeting_timer = None
-greeting_timer_lock = threading.Lock()
 
 def make_clickable_link(vk_link: str) -> str:
     if not vk_link:
@@ -151,7 +143,19 @@ def rate_limit():
 def extract_vk_link(text: str) -> Optional[str]:
     if not text:
         return None
-    patterns = [r'(wall-?\d+_\d+)', r'(photo-?\d+_\d+)', r'(video-?\d+_\d+)', r'(clip-?\d+_\d+)']
+    patterns = [
+        r'(wall-?\d+_\d+)',
+        r'(photo-?\d+_\d+)',
+        r'(video-?\d+_\d+)',
+        r'(clip-?\d+_\d+)',
+        r'(audio-?\d+_\d+)',
+        r'(topic-?\d+_\d+)',
+        r'(market-?\d+_\d+)',
+        r'(album-?\d+_\d+)',
+        r'(poll-?\d+_\d+)',
+        r'(note-?\d+_\d+)',
+        r'(doc-?\d+_\d+)',
+    ]
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
@@ -175,6 +179,12 @@ def get_content_type(vk_link: str) -> Tuple[str, int, int]:
         return 'video', int(type_and_owner[5:]), item_id
     elif type_and_owner.startswith('clip'):
         return 'video', int(type_and_owner[4:]), item_id
+    elif type_and_owner.startswith('audio'):
+        return 'audio', int(type_and_owner[5:]), item_id
+    elif type_and_owner.startswith('market'):
+        return 'market', int(type_and_owner[6:]), item_id
+    elif type_and_owner.startswith('topic'):
+        return 'topic', int(type_and_owner[5:]), item_id
     return '', 0, 0
 
 def check_user_like(user_id: int, vk_link: str) -> bool:
@@ -185,8 +195,8 @@ def check_user_like(user_id: int, vk_link: str) -> bool:
         return False
     
     content_type, owner_id, item_id = get_content_type(vk_link)
-    if not content_type:
-        return True
+    if not content_type or owner_id == 0 or item_id == 0:
+        return True  # Неподдерживаемый тип — пропускаем
     
     try:
         rate_limit()
@@ -199,8 +209,10 @@ def check_user_like(user_id: int, vk_link: str) -> bool:
         
         if isinstance(response, dict):
             liked = response.get('liked', 0)
-            print(f"   📊 Лайк {'✅ ЕСТЬ' if liked == 1 else '❌ НЕТ'}")
-            return liked == 1
+            copied = response.get('copied', 0)
+            result = liked == 1 or copied == 1
+            print(f"   📊 Лайк {'✅ ЕСТЬ' if result else '❌ НЕТ'}")
+            return result
         return response == 1
     except Exception as e:
         print(f"   ❌ Ошибка проверки лайка: {e}")
@@ -225,13 +237,15 @@ def get_posts_after_user(user_id: int) -> int:
 def send_message(peer_id: int, text: str):
     global vk_group
     if vk_group is None:
-        return
+        return None
     try:
         rate_limit()
-        vk_group.messages.send(peer_id=peer_id, message=text, random_id=int(time.time() * 1000))
+        result = vk_group.messages.send(peer_id=peer_id, message=text, random_id=int(time.time() * 1000))
         print(f"✅ Отправлено: {text[:50]}...")
+        return result
     except Exception as e:
         print(f"❌ Ошибка отправки: {e}")
+        return None
     sys.stdout.flush()
 
 def delete_message(peer_id: int, message_id: int) -> bool:
@@ -248,42 +262,27 @@ def delete_message(peer_id: int, message_id: int) -> bool:
     except:
         return False
 
-def schedule_greeting(peer_id: int):
-    global greeting_timer
-    def send_greeting():
-        time.sleep(10)
-        send_message(peer_id, "👋 Привет! Перед публикацией своей ссылки обязательно прочитай закреп в чате. Обязательно!")
-    with greeting_timer_lock:
-        if greeting_timer and greeting_timer.is_alive():
-            greeting_timer.cancel()
-        greeting_timer = threading.Thread(target=send_greeting, daemon=True)
-        greeting_timer.start()
-
 def handle_vip_commands(text: str, user_id: int, peer_id: int) -> bool:
     global vip_links
     if not is_admin(user_id):
-        send_message(peer_id, "❌ Только администраторы могут управлять VIP-ссылками!")
+        send_message(peer_id, "❌ Только администраторы!")
         return True
-    
     if text.lower().startswith('!vip '):
         vk_link = extract_vk_link(text.split()[1])
         if vk_link:
             with vip_links_lock:
-                vip_links.append({'link': vk_link, 'added_by': user_id, 'expires_at': datetime.now() + timedelta(hours=VIP_DURATION_HOURS)})
+                vip_links.append({'link': vk_link, 'added_by': user_id, 'expires_at': datetime.now() + timedelta(hours=24)})
                 save_vip_links()
             send_message(peer_id, f"⭐ VIP-ссылка добавлена!\n🔗 {make_clickable_link(vk_link)}")
         return True
-    
     if text.lower().startswith('!delvip'):
         parts = text.split()
         if len(parts) >= 2:
-            vk_link = parts[1]
             with vip_links_lock:
-                vip_links = [v for v in vip_links if v['link'] != vk_link]
+                vip_links = [v for v in vip_links if v['link'] != parts[1]]
                 save_vip_links()
             send_message(peer_id, "✅ VIP-ссылка удалена!")
         return True
-    
     if text.lower() == '!vip_list':
         with vip_links_lock:
             if not vip_links:
@@ -296,8 +295,17 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int) -> bool:
         return True
     return False
 
-def process_message(peer_id: int, user_id: int, text: str, message_id: int):
+def process_message(event):
     global queue
+    try:
+        message = event.object.message
+        peer_id = message['peer_id']
+        user_id = message['from_id']
+        text = message.get('text', '').strip()
+        message_id = message.get('conversation_message_id', message.get('id', 0))
+    except:
+        return
+    
     print(f"\n📩 {user_id}: {text[:50]}")
     sys.stdout.flush()
     
@@ -319,7 +327,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int):
             return
         if message_id:
             delete_message(peer_id, message_id)
-        send_message(peer_id, "🔗 Нужна ссылка!")
+        send_message(peer_id, "🔗 Нужна ссылка на контент ВКонтакте!")
         return
     
     if admin:
@@ -328,36 +336,40 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int):
             if len(queue) > MAX_QUEUE_SIZE:
                 queue.pop(0)
             save_queue()
-        send_message(peer_id, f"✅ Опубликовано!\n🔗 {make_clickable_link(vk_link)}")
+        send_message(peer_id, f"✅ Ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}")
         return
     
-    # Проверка VIP-лайков
+    # ПРОВЕРКА 1: VIP-лайки
     with vip_links_lock:
         if vip_links:
+            print(f"   🔍 Проверка VIP-лайков...")
             for vip in vip_links:
                 if not check_user_like(user_id, vip['link']):
                     if message_id:
                         delete_message(peer_id, message_id)
-                    send_message(peer_id, f"⭐ Нужен лайк на VIP:\n🔗 {make_clickable_link(vip['link'])}")
+                    send_message(peer_id, f"⭐ Нужен лайк на VIP-ссылку:\n🔗 {make_clickable_link(vip['link'])}")
                     return
+            print(f"   ✅ VIP-лайки есть!")
     
-    # Проверка лайков на очередь
+    # ПРОВЕРКА 2: Лайки на очередь
     with queue_lock:
         links_to_check = [item['link'] for item in queue[-10:]]
     if links_to_check:
+        print(f"   🔍 Проверка лайков на очередь...")
         for link in links_to_check:
             if not check_user_like(user_id, link):
                 if message_id:
                     delete_message(peer_id, message_id)
                 send_message(peer_id, f"❌ Нужен лайк на:\n🔗 {make_clickable_link(link)}")
                 return
+        print(f"   ✅ Все лайки есть!")
     
-    # Частота
+    # ПРОВЕРКА 3: Частота
     if not can_user_post(user_id):
         need = max(0, 5 - get_posts_after_user(user_id))
         if message_id:
             delete_message(peer_id, message_id)
-        send_message(peer_id, f"⏳ Жди {need} постов!")
+        send_message(peer_id, f"⏳ Подожди, нужно {need} чужих постов!")
         return
     
     if message_id:
@@ -369,83 +381,36 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int):
             queue.pop(0)
         save_queue()
     
-    send_message(peer_id, f"✅ Опубликовано!\n🔗 {make_clickable_link(vk_link)}")
+    send_message(peer_id, f"✅ Ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}\n📊 В очереди: {len(queue)}")
 
-class CallbackHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        body = CONFIRMATION_CODE.encode() if self.path in ['/', '/callback'] else b'OK'
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/plain')
-        self.send_header('Content-Length', str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-    
-    def do_POST(self):
-        length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(length)
-        
-        try:
-            data = json.loads(body)
-            
-            if data.get('type') == 'confirmation':
-                rb = CONFIRMATION_CODE.encode()
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain')
-                self.send_header('Content-Length', str(len(rb)))
-                self.end_headers()
-                self.wfile.write(rb)
-            
-            elif data.get('type') == 'message_new':
-                msg = data.get('object', {}).get('message', {})
-                thread = threading.Thread(target=process_message, args=(
-                    msg.get('peer_id', 0),
-                    msg.get('from_id', 0),
-                    msg.get('text', ''),
-                    msg.get('conversation_message_id', msg.get('id', 0))
-                ), daemon=True)
-                thread.start()
-                
-                rb = b'ok'
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain')
-                self.send_header('Content-Length', str(len(rb)))
-                self.end_headers()
-                self.wfile.write(rb)
-            
-            else:
-                rb = b'ok'
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain')
-                self.send_header('Content-Length', str(len(rb)))
-                self.end_headers()
-                self.wfile.write(rb)
-        except:
-            rb = b'ok'
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/plain')
-            self.send_header('Content-Length', str(len(rb)))
-            self.end_headers()
-            self.wfile.write(rb)
-    
-    def log_message(self, fmt, *args):
-        pass
-
-if __name__ == "__main__":
+def main():
+    global vk_group, vk_user
     init_database()
     load_data()
-    
-    # Групповой API
-    vk_group_session = vk_api.VkApi(token=GROUP_TOKEN)
-    vk_group = vk_group_session.get_api()
-    print("✅ Групповой API подключен")
-    
-    # Пользовательский API
-    vk_user_session = vk_api.VkApi(token=USER_TOKEN)
-    vk_user = vk_user_session.get_api()
-    print("✅ Пользовательский API подключен")
-    
-    print(f"📡 Порт: {PORT}")
-    sys.stdout.flush()
-    
-    server = HTTPServer(('0.0.0.0', PORT), CallbackHandler)
-    server.serve_forever()
+    try:
+        print("🔄 Подключение...")
+        sys.stdout.flush()
+        
+        vk_group_session = vk_api.VkApi(token=GROUP_TOKEN)
+        vk_group = vk_group_session.get_api()
+        print("✅ Групповой API подключен")
+        
+        vk_user_session = vk_api.VkApi(token=USER_TOKEN)
+        vk_user = vk_user_session.get_api()
+        print("✅ Пользовательский API подключен")
+        
+        longpoll = VkBotLongPoll(vk_group_session, GROUP_ID)
+        print("✅ Long Poll подключен")
+        print("=" * 60)
+        sys.stdout.flush()
+        
+        for event in longpoll.listen():
+            if event.type == VkBotEventType.MESSAGE_NEW:
+                process_message(event)
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        traceback.print_exc()
+        sys.stdout.flush()
+
+if __name__ == "__main__":
+    main()
