@@ -26,7 +26,7 @@ except ImportError as e:
     raise
 
 # ====================== НАСТРОЙКИ ======================
-GROUP_TOKEN = "vk1.a.yQ0EmzxYEcYJEoDfw_Fv3XxltfsHJkUWWkWJQfWe65HY_sWy5-4mufFdSk_VONZ6V5jrHsljtWMZm_UnKKsOIp7uhtMdSOCR-r0Qf8S3B5sYFMtgk2hBdo4IV_hgIzIDcJx8ZzSdEEBPC4cmMnIxrxBgtSUzw0x2xdydHTh5bsmhDaOWbRpo73wrT_bH7gbGLcpSv2v1S05IJnCsD5UrKw"
+GROUP_TOKEN = "USER_TOKEN = "vk1.a.LAI_7-_1AYdXEdkeN_nWBfoybK5BnZk8MyL2ZBsTYOtM9lepynwLOtw4TVs2_7BudtG7cWJzTTkbroa5L6kIiTe_5ea1e58AEo30pzEPXITix6spiZOl_YUpAI2JksekSSfiajJ49OaA-4frRN9xf0zG7vlVjF_s9D4zOOlciye97YWSoX31sZBVbLvBVbOh79K5vYOQaUN-ZVBjU-abhg""
 GROUP_ID = 241064421
 GROUP_LINK = "https://vk.ru/bellbotgr"
 CONFIRMATION_CODE = "b4f9f4a0"
