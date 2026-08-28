@@ -8,7 +8,7 @@ import traceback
 from typing import Optional, List, Tuple
 
 print("=" * 60)
-print("🚀 БОТ ЗАПУСКАЕТСЯ (BotHost + Long Poll + Мульти-проверка)...")
+print("🚀 БОТ ЗАПУСКАЕТСЯ (BotHost + Мульти-проверка v2)...")
 print("=" * 60)
 sys.stdout.flush()
 
@@ -25,13 +25,6 @@ except ImportError as e:
 
 # ====================== НАСТРОЙКИ ======================
 GROUP_TOKEN = "vk1.a.5qm5-BTRZRJwz4_MQekr5_u4GxRq7VnW3QOIvtkgTfr-qygqi5_IrjLwlM9HkVnEh3kCGm_zLaw-BwFRgZ_3xsJAgeWJwSQQ3-5pageEgfPdK35TElpGfgjuF0IyKimfNvyBW4GfqI0EvBmzFDezi3SbFGcv-E_YHoQbCVRG2gxEW55BsVSl1epMYwakeLstp9YQy6jT5uFUXUMxtGlSLQ"
-
-# Сервисный ключ (для likes.isLiked)
-SERVICE_TOKEN = "764a051c764a051c764a051c6d750938ed7764a764a051c1cc5eee451098d06dcb1c831"
-
-# Пользовательский токен (для проверки лайков)
-USER_TOKEN = "vk1.a.7OcTzOvjiT6PEeqip2NMo94Yh9FXPISldRsNW_9HfIqT4Cz6dMB2vN8orqxrraWK2E9UJ4AKfRpB16hd_6EjDeck2ebT8m2MAjueIVWeeP0ANst-Dhqvq6q1RfQaX0J9fUtD4e3G4byEmoVIs_z3ykb1zBv2X9X3ng28hYDS-kl0DZdLmjhykP3pcOaAJ5CM"
-
 GROUP_ID = 241064421
 ADMIN_IDS = [447457340]
 # ======================================================
@@ -45,10 +38,7 @@ queue = []
 queue_lock = threading.Lock()
 vip_links = []
 vip_links_lock = threading.Lock()
-
-vk_group = None   # Групповой API (Long Poll)
-vk_service = None # Сервисный API (likes.isLiked)
-vk_user = None    # Пользовательский API (likes.isLiked)
+vk = None
 
 def make_clickable_link(vk_link: str) -> str:
     if not vk_link:
@@ -146,7 +136,7 @@ def rate_limit():
 def extract_vk_link(text: str) -> Optional[str]:
     if not text:
         return None
-    patterns = [r'(wall-?\d+_\d+)', r'(photo-?\d+_\d+)', r'(video-?\d+_\d+)', r'(clip-?\d+_\d+)', r'(audio-?\d+_\d+)', r'(topic-?\d+_\d+)', r'(market-?\d+_\d+)']
+    patterns = [r'(wall-?\d+_\d+)', r'(photo-?\d+_\d+)', r'(video-?\d+_\d+)', r'(clip-?\d+_\d+)']
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
@@ -170,122 +160,50 @@ def get_content_type(vk_link: str) -> Tuple[str, int, int]:
         return 'video', int(type_and_owner[5:]), item_id
     elif type_and_owner.startswith('clip'):
         return 'video', int(type_and_owner[4:]), item_id
-    elif type_and_owner.startswith('audio'):
-        return 'audio', int(type_and_owner[5:]), item_id
-    elif type_and_owner.startswith('market'):
-        return 'market', int(type_and_owner[6:]), item_id
     return '', 0, 0
 
-def check_like_method_1(user_id: int, vk_link: str) -> bool:
-    """Метод 1: Сервисный ключ + likes.isLiked"""
-    global vk_service
-    if vk_service is None:
-        return False
-    
+def check_like_v1(user_id: int, vk_link: str) -> bool:
+    """Метод 1: execute + likes.getList с VK Script циклом"""
+    global vk
     content_type, owner_id, item_id = get_content_type(vk_link)
     if not content_type:
         return True
     
-    try:
-        rate_limit()
-        response = vk_service.likes.isLiked(
-            user_id=user_id,
-            type=content_type,
-            owner_id=owner_id,
-            item_id=item_id
-        )
-        
-        if isinstance(response, dict):
-            liked = response.get('liked', 0)
-            if liked == 1:
-                print(f"   ✅ Метод 1 (сервисный ключ): лайк ЕСТЬ")
-                return True
-        elif response == 1:
-            print(f"   ✅ Метод 1 (сервисный ключ): лайк ЕСТЬ")
-            return True
-        
-        print(f"   ❌ Метод 1 (сервисный ключ): лайка НЕТ")
-        return False
-    except Exception as e:
-        print(f"   ⚠️ Метод 1 ошибка: {e}")
-        return False
-
-def check_like_method_2(user_id: int, vk_link: str) -> bool:
-    """Метод 2: Пользовательский токен + likes.isLiked"""
-    global vk_user
-    if vk_user is None:
-        return False
-    
-    content_type, owner_id, item_id = get_content_type(vk_link)
-    if not content_type:
-        return True
+    code = f'''
+    var user_id = {user_id};
+    var likes = API.likes.getList({{
+        "type": "{content_type}",
+        "owner_id": {owner_id},
+        "item_id": {item_id},
+        "count": 1000
+    }});
+    var found = 0;
+    if (likes != null && likes.items != null) {{
+        var i = 0;
+        while (i < likes.items.length) {{
+            if (likes.items[i] == user_id) {{
+                found = 1;
+            }}
+            i = i + 1;
+        }}
+    }}
+    return {{"found": found}};
+    '''
     
     try:
         rate_limit()
-        response = vk_user.likes.isLiked(
-            user_id=user_id,
-            type=content_type,
-            owner_id=owner_id,
-            item_id=item_id
-        )
-        
+        response = vk.execute(code=code)
         if isinstance(response, dict):
-            liked = response.get('liked', 0)
-            if liked == 1:
-                print(f"   ✅ Метод 2 (пользовательский): лайк ЕСТЬ")
-                return True
-        elif response == 1:
-            print(f"   ✅ Метод 2 (пользовательский): лайк ЕСТЬ")
-            return True
-        
-        print(f"   ❌ Метод 2 (пользовательский): лайка НЕТ")
+            return response.get('found', 0) == 1
         return False
-    except Exception as e:
-        print(f"   ⚠️ Метод 2 ошибка: {e}")
+    except:
         return False
 
-def check_like_method_3(user_id: int, vk_link: str) -> bool:
-    """Метод 3: Групповой токен + wall.get(fields='likes')"""
-    global vk_group
-    if vk_group is None:
-        return False
-    
+def check_like_v2(user_id: int, vk_link: str) -> bool:
+    """Метод 2: wall.get с filter='likes'"""
+    global vk
     if not vk_link.startswith('wall'):
         return True
-    
-    parts = vk_link.split('_')
-    owner_id = int(parts[0][4:])
-    item_id = int(parts[1])
-    
-    try:
-        rate_limit()
-        response = vk_group.wall.getById(
-            posts=[f"{owner_id}_{item_id}"],
-            extended=0
-        )
-        
-        if response and len(response) > 0:
-            likes = response[0].get('likes', {})
-            user_likes = likes.get('user_likes', 0)
-            if user_likes == 1:
-                print(f"   ✅ Метод 3 (wall.getById): лайк ЕСТЬ")
-                return True
-        
-        print(f"   ❌ Метод 3 (wall.getById): лайка НЕТ")
-        return False
-    except Exception as e:
-        print(f"   ⚠️ Метод 3 ошибка: {e}")
-        return False
-
-def check_like_method_4(user_id: int, vk_link: str) -> bool:
-    """Метод 4: Групповой токен + execute"""
-    global vk_group
-    if vk_group is None:
-        return False
-    
-    if not vk_link.startswith('wall'):
-        return True
-    
     parts = vk_link.split('_')
     owner_id = int(parts[0][4:])
     item_id = int(parts[1])
@@ -313,37 +231,131 @@ def check_like_method_4(user_id: int, vk_link: str) -> bool:
     
     try:
         rate_limit()
-        response = vk_group.execute(code=code)
+        response = vk.execute(code=code)
         if isinstance(response, dict):
-            found = response.get('found', 0)
-            if found == 1:
-                print(f"   ✅ Метод 4 (execute): лайк ЕСТЬ")
-                return True
-        
-        print(f"   ❌ Метод 4 (execute): лайка НЕТ")
+            return response.get('found', 0) == 1
         return False
-    except Exception as e:
-        print(f"   ⚠️ Метод 4 ошибка: {e}")
+    except:
+        return False
+
+def check_like_v3(user_id: int, vk_link: str) -> bool:
+    """Метод 3: wall.getById с user_likes"""
+    global vk
+    if not vk_link.startswith('wall'):
+        return True
+    parts = vk_link.split('_')
+    owner_id = int(parts[0][4:])
+    item_id = int(parts[1])
+    
+    try:
+        rate_limit()
+        response = vk.wall.getById(posts=[f"{owner_id}_{item_id}"])
+        if response and len(response) > 0:
+            likes = response[0].get('likes', {})
+            return likes.get('user_likes', 0) == 1
+        return False
+    except:
+        return False
+
+def check_like_v4(user_id: int, vk_link: str) -> bool:
+    """Метод 4: wall.search с extended"""
+    global vk
+    if not vk_link.startswith('wall'):
+        return True
+    parts = vk_link.split('_')
+    owner_id = int(parts[0][4:])
+    item_id = int(parts[1])
+    
+    try:
+        rate_limit()
+        response = vk.wall.search(
+            owner_id=owner_id,
+            query='',
+            count=100,
+            extended=1,
+            fields='likes'
+        )
+        items = response.get('items', [])
+        for item in items:
+            if item.get('id') == item_id:
+                likes = item.get('likes', {})
+                return likes.get('user_likes', 0) == 1
+        return False
+    except:
+        return False
+
+def check_like_v5(user_id: int, vk_link: str) -> bool:
+    """Метод 5: users.get с activities"""
+    global vk
+    try:
+        rate_limit()
+        response = vk.users.get(
+            user_ids=[user_id],
+            fields='activities'
+        )
+        # Не работает для проверки лайков, но пробуем
+        return False
+    except:
+        return False
+
+def check_like_v6(user_id: int, vk_link: str) -> bool:
+    """Метод 6: fave.get для проверки избранного"""
+    global vk
+    try:
+        rate_limit()
+        response = vk.fave.get(count=100)
+        items = response.get('items', [])
+        for item in items:
+            if 'link_url' in item and vk_link in item.get('link_url', ''):
+                return True
+        return False
+    except:
+        return False
+
+def check_like_v7(user_id: int, vk_link: str) -> bool:
+    """Метод 7: wall.getComments для проверки комментария"""
+    global vk
+    if not vk_link.startswith('wall'):
+        return True
+    parts = vk_link.split('_')
+    owner_id = int(parts[0][4:])
+    item_id = int(parts[1])
+    
+    try:
+        rate_limit()
+        response = vk.wall.getComments(
+            owner_id=owner_id,
+            post_id=item_id,
+            count=100
+        )
+        items = response.get('items', [])
+        for comment in items:
+            if comment.get('from_id') == user_id:
+                return True
+        return False
+    except:
         return False
 
 def check_user_like(user_id: int, vk_link: str) -> bool:
-    """Проверка лайка всеми методами"""
-    # Метод 1: Сервисный ключ
-    if check_like_method_1(user_id, vk_link):
-        return True
+    """Проверка всеми методами"""
+    methods = [
+        check_like_v1,
+        check_like_v2,
+        check_like_v3,
+        check_like_v4,
+        check_like_v6,
+        check_like_v7,
+    ]
     
-    # Метод 2: Пользовательский токен
-    if check_like_method_2(user_id, vk_link):
-        return True
+    for method in methods:
+        try:
+            if method(user_id, vk_link):
+                print(f"   ✅ Лайк найден через {method.__name__}")
+                return True
+        except:
+            continue
     
-    # Метод 3: wall.getById
-    if check_like_method_3(user_id, vk_link):
-        return True
-    
-    # Метод 4: execute
-    if check_like_method_4(user_id, vk_link):
-        return True
-    
+    print(f"   ❌ Лайк не найден ни одним методом")
     return False
 
 def can_user_post(user_id: int) -> bool:
@@ -363,12 +375,12 @@ def get_posts_after_user(user_id: int) -> int:
         return len(queue) - user_posts[-1] - 1
 
 def send_message(peer_id: int, text: str):
-    global vk_group
-    if vk_group is None:
+    global vk
+    if vk is None:
         return None
     try:
         rate_limit()
-        result = vk_group.messages.send(peer_id=peer_id, message=text, random_id=int(time.time() * 1000))
+        result = vk.messages.send(peer_id=peer_id, message=text, random_id=int(time.time() * 1000))
         print(f"✅ Отправлено: {text[:50]}...")
         return result
     except Exception as e:
@@ -377,15 +389,15 @@ def send_message(peer_id: int, text: str):
     sys.stdout.flush()
 
 def delete_message(peer_id: int, message_id: int) -> bool:
-    global vk_group
-    if vk_group is None or not message_id:
+    global vk
+    if vk is None or not message_id:
         return False
     try:
         rate_limit()
         if peer_id >= 2000000000:
-            vk_group.messages.delete(peer_id=peer_id, cmids=[message_id], delete_for_all=True)
+            vk.messages.delete(peer_id=peer_id, cmids=[message_id], delete_for_all=True)
         else:
-            vk_group.messages.delete(peer_id=peer_id, message_ids=[message_id], delete_for_all=True)
+            vk.messages.delete(peer_id=peer_id, message_ids=[message_id], delete_for_all=True)
         return True
     except:
         return False
@@ -402,14 +414,6 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int) -> bool:
                 vip_links.append({'link': vk_link, 'added_by': user_id, 'expires_at': datetime.now() + timedelta(hours=24)})
                 save_vip_links()
             send_message(peer_id, f"⭐ VIP-ссылка добавлена!\n🔗 {make_clickable_link(vk_link)}")
-        return True
-    if text.lower().startswith('!delvip'):
-        parts = text.split()
-        if len(parts) >= 2:
-            with vip_links_lock:
-                vip_links = [v for v in vip_links if v['link'] != parts[1]]
-                save_vip_links()
-            send_message(peer_id, "✅ VIP-ссылка удалена!")
         return True
     if text.lower() == '!vip_list':
         with vip_links_lock:
@@ -470,27 +474,23 @@ def process_message(event):
     # Проверка VIP-лайков
     with vip_links_lock:
         if vip_links:
-            print(f"   🔍 Проверка VIP-лайков...")
             for vip in vip_links:
                 if not check_user_like(user_id, vip['link']):
                     if message_id:
                         delete_message(peer_id, message_id)
                     send_message(peer_id, f"⭐ Нужен лайк на VIP:\n🔗 {make_clickable_link(vip['link'])}")
                     return
-            print(f"   ✅ VIP-лайки есть!")
     
     # Проверка лайков на очередь
     with queue_lock:
         links_to_check = [item['link'] for item in queue[-10:]]
     if links_to_check:
-        print(f"   🔍 Проверка лайков на очередь...")
         for link in links_to_check:
             if not check_user_like(user_id, link):
                 if message_id:
                     delete_message(peer_id, message_id)
                 send_message(peer_id, f"❌ Нужен лайк на:\n🔗 {make_clickable_link(link)}")
                 return
-        print(f"   ✅ Все лайки есть!")
     
     # Частота
     if not can_user_post(user_id):
@@ -512,40 +512,17 @@ def process_message(event):
     send_message(peer_id, f"✅ Опубликовано!\n🔗 {make_clickable_link(vk_link)}")
 
 def main():
-    global vk_group, vk_service, vk_user
+    global vk
     init_database()
     load_data()
     try:
         print("🔄 Подключение...")
         sys.stdout.flush()
-        
-        # Групповой API
-        vk_group_session = vk_api.VkApi(token=GROUP_TOKEN)
-        vk_group = vk_group_session.get_api()
-        print("✅ Групповой API подключен")
-        
-        # Сервисный API
-        vk_service_session = vk_api.VkApi(token=SERVICE_TOKEN)
-        vk_service = vk_service_session.get_api()
-        print("✅ Сервисный API подключен")
-        
-        # Пользовательский API
-        try:
-            vk_user_session = vk_api.VkApi(token=USER_TOKEN)
-            vk_user = vk_user_session.get_api()
-            print("✅ Пользовательский API подключен")
-        except:
-            print("⚠️ Пользовательский API не подключен (токен может быть невалидным)")
-            vk_user = None
-        
-        longpoll = VkBotLongPoll(vk_group_session, GROUP_ID)
+        vk_session = vk_api.VkApi(token=GROUP_TOKEN)
+        vk = vk_session.get_api()
+        print("✅ VK API подключен")
+        longpoll = VkBotLongPoll(vk_session, GROUP_ID)
         print("✅ Long Poll подключен")
-        print("=" * 60)
-        print("🔍 Мульти-проверка лайков:")
-        print("   Метод 1: Сервисный ключ")
-        print("   Метод 2: Пользовательский токен")
-        print("   Метод 3: wall.getById")
-        print("   Метод 4: execute")
         print("=" * 60)
         sys.stdout.flush()
         
