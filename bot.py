@@ -29,8 +29,9 @@ except ImportError as e:
 GROUP_TOKEN = "vk1.a.yQ0EmzxYEcYJEoDfw_Fv3XxltfsHJkUWWkWJQfWe65HY_sWy5-4mufFdSk_VONZ6V5jrHsljtWMZm_UnKKsOIp7uhtMdSOCR-r0Qf8S3B5sYFMtgk2hBdo4IV_hgIzIDcJx8ZzSdEEBPC4cmMnIxrxBgtSUzw0x2xdydHTh5bsmhDaOWbRpo73wrT_bH7gbGLcpSv2v1S05IJnCsD5UrKw"
 GROUP_ID = 241064421
 GROUP_LINK = "https://vk.ru/bellbotgr"
-CONFIRMATION_CODE = "b4f9f4a0"  # ← Новый код!
+CONFIRMATION_CODE = "b4f9f4a0"
 PORT = int(os.getenv("PORT", 3000))
+ADMIN_IDS = [447457340]
 # ======================================================
 
 MAX_QUEUE_SIZE = 10
@@ -44,15 +45,6 @@ vip_links = []
 vip_links_lock = threading.Lock()
 vk = None
 
-# Для удаления сообщений бота
-bot_messages = {}
-bot_messages_lock = threading.Lock()
-
-# Приветствие
-greeting_timer = None
-greeting_timer_lock = threading.Lock()
-
-# Кэши
 admin_cache = {}
 admin_cache_lock = threading.Lock()
 admin_cache_time = {}
@@ -61,12 +53,38 @@ member_cache = {}
 member_cache_lock = threading.Lock()
 member_cache_time = {}
 
+greeting_timer = None
+greeting_timer_lock = threading.Lock()
+
 def make_clickable_link(vk_link: str) -> str:
     if not vk_link:
         return vk_link
     if vk_link.startswith('http'):
         return vk_link
     return f"https://vk.com/{vk_link}"
+
+def is_admin(user_id: int) -> bool:
+    if user_id in ADMIN_IDS:
+        return True
+    global vk
+    with admin_cache_lock:
+        if user_id in admin_cache:
+            cache_time = admin_cache_time.get(user_id, 0)
+            if time.time() - cache_time < 300:
+                return admin_cache[user_id]
+    if vk is None:
+        return False
+    try:
+        rate_limit()
+        response = vk.groups.getMembers(group_id=GROUP_ID, filter='managers', count=1000)
+        admins = response.get('items', [])
+        is_admin = user_id in admins
+        with admin_cache_lock:
+            admin_cache[user_id] = is_admin
+            admin_cache_time[user_id] = time.time()
+        return is_admin
+    except:
+        return False
 
 def init_database():
     try:
@@ -156,27 +174,6 @@ def save_vip_links():
 def rate_limit():
     time.sleep(RATE_LIMIT_DELAY)
 
-def is_group_admin(user_id: int) -> bool:
-    global vk
-    with admin_cache_lock:
-        if user_id in admin_cache:
-            cache_time = admin_cache_time.get(user_id, 0)
-            if time.time() - cache_time < 300:
-                return admin_cache[user_id]
-    if vk is None:
-        return False
-    try:
-        rate_limit()
-        response = vk.groups.getMembers(group_id=GROUP_ID, filter='managers', count=1000)
-        admins = response.get('items', [])
-        is_admin = user_id in admins
-        with admin_cache_lock:
-            admin_cache[user_id] = is_admin
-            admin_cache_time[user_id] = time.time()
-        return is_admin
-    except:
-        return False
-
 def is_group_member(user_id: int) -> bool:
     global vk
     with member_cache_lock:
@@ -215,42 +212,88 @@ def extract_vk_link(text: str) -> Optional[str]:
             return match.group(1)
     return None
 
-def check_like_wall(user_id: int, vk_link: str) -> bool:
+def get_content_type(vk_link: str) -> Tuple[str, int, int]:
+    if '_' not in vk_link:
+        return '', 0, 0
+    parts = vk_link.split('_')
+    type_and_owner = parts[0]
+    try:
+        item_id = int(parts[1])
+    except:
+        return '', 0, 0
+    if type_and_owner.startswith('wall'):
+        return 'post', int(type_and_owner[4:]), item_id
+    elif type_and_owner.startswith('photo'):
+        return 'photo', int(type_and_owner[5:]), item_id
+    elif type_and_owner.startswith('video'):
+        return 'video', int(type_and_owner[5:]), item_id
+    elif type_and_owner.startswith('clip'):
+        return 'video', int(type_and_owner[4:]), item_id
+    elif type_and_owner.startswith('market'):
+        return 'market', int(type_and_owner[6:]), item_id
+    return '', 0, 0
+
+def check_user_like(user_id: int, vk_link: str) -> bool:
+    """Проверка: есть ли user_id в списке лайкнувших"""
     global vk
     if vk is None:
         return False
-    if not vk_link.startswith('wall'):
-        return True
-    parts = vk_link.split('_')
-    owner_id = int(parts[0][4:])
-    item_id = int(parts[1])
+    
+    content_type, owner_id, item_id = get_content_type(vk_link)
+    if not content_type or owner_id == 0 or item_id == 0:
+        return True  # Неподдерживаемый тип — пропускаем
+    
+    # Метод 1: likes.getList напрямую
+    try:
+        rate_limit()
+        response = vk.likes.getList(
+            type=content_type,
+            owner_id=owner_id,
+            item_id=item_id,
+            count=1000,
+            filter='likes'
+        )
+        users = response.get('items', [])
+        has_like = user_id in users
+        print(f"   📊 Лайк {'✅ НАЙДЕН' if has_like else '❌ НЕ найден'} (всего: {len(users)})")
+        return has_like
+    except ApiError as e:
+        print(f"   ⚠️ API ошибка: {e}")
+    except Exception as e:
+        print(f"   ⚠️ Ошибка: {e}")
+    
+    # Метод 2: через execute
     code = f'''
-    var owner_id = {owner_id};
-    var item_id = {item_id};
-    var result = {{"found": 0}};
-    var wall = API.wall.get({{
-        "owner_id": owner_id,
-        "count": 100,
-        "filter": "likes"
+    var user_id = {user_id};
+    var likes = API.likes.getList({{
+        "type": "{content_type}",
+        "owner_id": {owner_id},
+        "item_id": {item_id},
+        "count": 1000
     }});
-    if (wall != null && wall.items != null) {{
+    var found = 0;
+    if (likes != null && likes.items != null) {{
         var i = 0;
-        while (i < wall.items.length) {{
-            if (wall.items[i].id == item_id) {{
-                result.found = 1;
+        while (i < likes.items.length) {{
+            if (likes.items[i] == user_id) {{
+                found = 1;
             }}
             i = i + 1;
         }}
     }}
-    return result;
+    return {{"found": found}};
     '''
+    
     try:
         rate_limit()
         response = vk.execute(code=code)
         if isinstance(response, dict):
-            return response.get('found', 0) == 1
+            found = response.get('found', 0)
+            print(f"   📊 execute: {'✅ НАЙДЕН' if found == 1 else '❌ НЕ найден'}")
+            return found == 1
         return False
-    except:
+    except Exception as e:
+        print(f"   ❌ execute ошибка: {e}")
         return False
 
 def can_user_post(user_id: int) -> bool:
@@ -273,31 +316,29 @@ def get_posts_after_user(user_id: int) -> int:
         return len(queue) - last_user_post_index - 1
 
 def send_message(peer_id: int, text: str, delete_after: int = 40):
-    """Отправка сообщения с удалением через 40 секунд"""
     global vk
     if vk is None:
         return
+    random_id = int(time.time() * 1000)
     try:
         rate_limit()
-        result = vk.messages.send(peer_id=peer_id, message=text, random_id=int(time.time() * 1000))
-        message_id = result if isinstance(result, int) and result > 0 else None
+        result = vk.messages.send(peer_id=peer_id, message=text, random_id=random_id)
+        print(f"✅ Отправлено (ID: {result}): {text[:50]}...")
         
-        if message_id and delete_after > 0:
+        if delete_after > 0 and result and result > 0:
             def delete_later():
                 time.sleep(delete_after)
                 try:
                     rate_limit()
                     if peer_id >= 2000000000:
-                        vk.messages.delete(peer_id=peer_id, cmids=[message_id], delete_for_all=True)
+                        vk.messages.delete(peer_id=peer_id, cmids=[result], delete_for_all=True)
                     else:
-                        vk.messages.delete(peer_id=peer_id, message_ids=[message_id], delete_for_all=True)
-                    print(f"🗑️ Удалено сообщение бота {message_id}")
+                        vk.messages.delete(peer_id=peer_id, message_ids=[result], delete_for_all=True)
+                    print(f"🗑️ Удалено сообщение бота {result}")
                 except:
                     pass
             thread = threading.Thread(target=delete_later, daemon=True)
             thread.start()
-        
-        print(f"✅ Отправлено: {text[:50]}...")
     except Exception as e:
         print(f"❌ Ошибка отправки: {e}")
     sys.stdout.flush()
@@ -395,9 +436,9 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int):
     if user_id < 0:
         return
     
-    is_admin = is_group_admin(user_id)
+    admin = is_admin(user_id)
+    print(f"   {'👑 Админ' if admin else '👤 Пользователь'}")
     
-    # VIP-команды
     if text.lower().startswith('!vip') or text.lower().startswith('!delvip'):
         if message_id:
             delete_message(peer_id, message_id)
@@ -406,21 +447,19 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int):
     
     vk_link = extract_vk_link(text)
     
-    # Без ссылки
     if not vk_link:
-        if is_admin:
-            print(f"👑 Админ — текст не удаляем")
+        if admin:
+            print(f"   👑 Админ — текст НЕ удаляем")
             return
         if message_id:
             delete_message(peer_id, message_id)
         send_message(peer_id, "🔗 Нужна ссылка на контент ВКонтакте!")
         return
     
-    print(f"✅ Ссылка: {vk_link}")
+    print(f"   ✅ Ссылка: {vk_link}")
     
-    # Админ — публикуем без проверок
-    if is_admin:
-        print(f"👑 Админ — публикуем без проверок")
+    if admin:
+        print(f"   👑 Админ — публикуем без проверок")
         with queue_lock:
             queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now(), 'is_admin_post': 1})
             if len(queue) > MAX_QUEUE_SIZE:
@@ -430,7 +469,6 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int):
         send_message(peer_id, f"✅ Ссылка опубликована!\n🔗 {clickable}\n📊 В очереди: {len(queue)}")
         return
     
-    # Проверка подписки
     if not is_group_member(user_id):
         if message_id:
             delete_message(peer_id, message_id)
@@ -440,8 +478,9 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int):
     # VIP-лайки
     with vip_links_lock:
         if vip_links:
+            print(f"   🔍 Проверка VIP-лайков...")
             for vip in vip_links:
-                if not check_like_wall(user_id, vip['link']):
+                if not check_user_like(user_id, vip['link']):
                     clickable = make_clickable_link(vip['link'])
                     if message_id:
                         delete_message(peer_id, message_id)
@@ -452,8 +491,9 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int):
     with queue_lock:
         links_to_check = [item['link'] for item in queue[-10:]]
     if links_to_check:
+        print(f"   🔍 Проверка лайков на очередь...")
         for link in links_to_check:
-            if not check_like_wall(user_id, link):
+            if not check_user_like(user_id, link):
                 clickable = make_clickable_link(link)
                 if message_id:
                     delete_message(peer_id, message_id)
@@ -484,7 +524,10 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int):
 
 class CallbackHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        response_body = b'Bot is running'
+        if self.path == '/callback' or self.path == '/':
+            response_body = CONFIRMATION_CODE.encode('utf-8')
+        else:
+            response_body = b'Bot is running'
         self.send_response(200)
         self.send_header('Content-Type', 'text/plain; charset=utf-8')
         self.send_header('Content-Length', str(len(response_body)))
