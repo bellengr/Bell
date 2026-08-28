@@ -1,32 +1,40 @@
-import sys
-import re
+import validators
+import vk_api
+from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
+from vk_api.keyboard import VkKeyboard, VkKeyboardColor
+from vk_api.exceptions import ApiError
 import time
-import sqlite3
-from datetime import datetime, timedelta
+import re
 import threading
-import traceback
-from typing import Optional, List, Tuple
+from itertools import islice
+from enum import Enum
+from typing import Dict, Any, List, Optional
+import sqlite3
+import random
+import logging
+import os
 
-print("=" * 60)
-print("🚀 БОТ ЗАПУСКАЕТСЯ (BotHost + Мульти-проверка v2)...")
-print("=" * 60)
-sys.stdout.flush()
+# ==================== НАСТРОЙКА ЛОГИРОВАНИЯ ====================
 
-try:
-    import vk_api
-    from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
-    from vk_api.exceptions import ApiError
-    print("✅ Библиотека vk-api загружена")
-    sys.stdout.flush()
-except ImportError as e:
-    print(f"❌ Ошибка импорта: {e}")
-    sys.stdout.flush()
-    raise
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
-# ====================== НАСТРОЙКИ ======================
+# ==================== НАСТРОЙКИ ====================
+# Групповой токен (для Long Poll)
 GROUP_TOKEN = "vk1.a.5qm5-BTRZRJwz4_MQekr5_u4GxRq7VnW3QOIvtkgTfr-qygqi5_IrjLwlM9HkVnEh3kCGm_zLaw-BwFRgZ_3xsJAgeWJwSQQ3-5pageEgfPdK35TElpGfgjuF0IyKimfNvyBW4GfqI0EvBmzFDezi3SbFGcv-E_YHoQbCVRG2gxEW55BsVSl1epMYwakeLstp9YQy6jT5uFUXUMxtGlSLQ"
+
+# Пользовательский токен (для проверки лайков)
+USER_TOKEN = "vk1.a.7OcTzOvjiT6PEeqip2NMo94Yh9FXPISldRsNW_9HfIqT4Cz6dMB2vN8orqxrraWK2E9UJ4AKfRpB16hd_6EjDeck2ebT8m2MAjueIVWeeP0ANst-Dhqvq6q1RfQaX0J9fUtD4e3G4byEmoVIs_z3ykb1zBv2X9X3ng28hYDS-kl0DZdLmjhykP3pcOaAJ5CM"
+
 GROUP_ID = 241064421
 ADMIN_IDS = [447457340]
+PEER_ID = 2000000014  # ID вашей беседы (замените!)
 # ======================================================
 
 MAX_QUEUE_SIZE = 10
@@ -34,11 +42,14 @@ VIP_DURATION_HOURS = 24
 RATE_LIMIT_DELAY = 0.34
 DB_FILE = "bot_database.db"
 
+# Глобальные API
+vk_group = None  # Групповой API
+vk_user = None   # Пользовательский API
+
 queue = []
 queue_lock = threading.Lock()
 vip_links = []
 vip_links_lock = threading.Lock()
-vk = None
 
 def make_clickable_link(vk_link: str) -> str:
     if not vk_link:
@@ -143,7 +154,7 @@ def extract_vk_link(text: str) -> Optional[str]:
             return match.group(1)
     return None
 
-def get_content_type(vk_link: str) -> Tuple[str, int, int]:
+def get_content_type(vk_link: str):
     if '_' not in vk_link:
         return '', 0, 0
     parts = vk_link.split('_')
@@ -162,201 +173,33 @@ def get_content_type(vk_link: str) -> Tuple[str, int, int]:
         return 'video', int(type_and_owner[4:]), item_id
     return '', 0, 0
 
-def check_like_v1(user_id: int, vk_link: str) -> bool:
-    """Метод 1: execute + likes.getList с VK Script циклом"""
-    global vk
+def check_user_like(user_id: int, vk_link: str) -> bool:
+    """Проверка лайка через ПОЛЬЗОВАТЕЛЬСКИЙ токен"""
+    global vk_user
+    if vk_user is None:
+        return False
+    
     content_type, owner_id, item_id = get_content_type(vk_link)
     if not content_type:
         return True
     
-    code = f'''
-    var user_id = {user_id};
-    var likes = API.likes.getList({{
-        "type": "{content_type}",
-        "owner_id": {owner_id},
-        "item_id": {item_id},
-        "count": 1000
-    }});
-    var found = 0;
-    if (likes != null && likes.items != null) {{
-        var i = 0;
-        while (i < likes.items.length) {{
-            if (likes.items[i] == user_id) {{
-                found = 1;
-            }}
-            i = i + 1;
-        }}
-    }}
-    return {{"found": found}};
-    '''
-    
     try:
         rate_limit()
-        response = vk.execute(code=code)
-        if isinstance(response, dict):
-            return response.get('found', 0) == 1
-        return False
-    except:
-        return False
-
-def check_like_v2(user_id: int, vk_link: str) -> bool:
-    """Метод 2: wall.get с filter='likes'"""
-    global vk
-    if not vk_link.startswith('wall'):
-        return True
-    parts = vk_link.split('_')
-    owner_id = int(parts[0][4:])
-    item_id = int(parts[1])
-    
-    code = f'''
-    var owner_id = {owner_id};
-    var item_id = {item_id};
-    var result = {{"found": 0}};
-    var wall = API.wall.get({{
-        "owner_id": owner_id,
-        "count": 100,
-        "filter": "likes"
-    }});
-    if (wall != null && wall.items != null) {{
-        var i = 0;
-        while (i < wall.items.length) {{
-            if (wall.items[i].id == item_id) {{
-                result.found = 1;
-            }}
-            i = i + 1;
-        }}
-    }}
-    return result;
-    '''
-    
-    try:
-        rate_limit()
-        response = vk.execute(code=code)
-        if isinstance(response, dict):
-            return response.get('found', 0) == 1
-        return False
-    except:
-        return False
-
-def check_like_v3(user_id: int, vk_link: str) -> bool:
-    """Метод 3: wall.getById с user_likes"""
-    global vk
-    if not vk_link.startswith('wall'):
-        return True
-    parts = vk_link.split('_')
-    owner_id = int(parts[0][4:])
-    item_id = int(parts[1])
-    
-    try:
-        rate_limit()
-        response = vk.wall.getById(posts=[f"{owner_id}_{item_id}"])
-        if response and len(response) > 0:
-            likes = response[0].get('likes', {})
-            return likes.get('user_likes', 0) == 1
-        return False
-    except:
-        return False
-
-def check_like_v4(user_id: int, vk_link: str) -> bool:
-    """Метод 4: wall.search с extended"""
-    global vk
-    if not vk_link.startswith('wall'):
-        return True
-    parts = vk_link.split('_')
-    owner_id = int(parts[0][4:])
-    item_id = int(parts[1])
-    
-    try:
-        rate_limit()
-        response = vk.wall.search(
-            owner_id=owner_id,
-            query='',
-            count=100,
-            extended=1,
-            fields='likes'
+        result = vk_user.likes.isLiked(
+            user_id=user_id,
+            item_id=item_id,
+            type=content_type,
+            owner_id=owner_id
         )
-        items = response.get('items', [])
-        for item in items:
-            if item.get('id') == item_id:
-                likes = item.get('likes', {})
-                return likes.get('user_likes', 0) == 1
+        
+        if isinstance(result, dict):
+            liked = result.get('liked', 0)
+            print(f"   📊 Лайк {'✅ ЕСТЬ' if liked == 1 else '❌ НЕТ'}")
+            return liked == 1
+        return result == 1
+    except Exception as e:
+        print(f"   ❌ Ошибка: {e}")
         return False
-    except:
-        return False
-
-def check_like_v5(user_id: int, vk_link: str) -> bool:
-    """Метод 5: users.get с activities"""
-    global vk
-    try:
-        rate_limit()
-        response = vk.users.get(
-            user_ids=[user_id],
-            fields='activities'
-        )
-        # Не работает для проверки лайков, но пробуем
-        return False
-    except:
-        return False
-
-def check_like_v6(user_id: int, vk_link: str) -> bool:
-    """Метод 6: fave.get для проверки избранного"""
-    global vk
-    try:
-        rate_limit()
-        response = vk.fave.get(count=100)
-        items = response.get('items', [])
-        for item in items:
-            if 'link_url' in item and vk_link in item.get('link_url', ''):
-                return True
-        return False
-    except:
-        return False
-
-def check_like_v7(user_id: int, vk_link: str) -> bool:
-    """Метод 7: wall.getComments для проверки комментария"""
-    global vk
-    if not vk_link.startswith('wall'):
-        return True
-    parts = vk_link.split('_')
-    owner_id = int(parts[0][4:])
-    item_id = int(parts[1])
-    
-    try:
-        rate_limit()
-        response = vk.wall.getComments(
-            owner_id=owner_id,
-            post_id=item_id,
-            count=100
-        )
-        items = response.get('items', [])
-        for comment in items:
-            if comment.get('from_id') == user_id:
-                return True
-        return False
-    except:
-        return False
-
-def check_user_like(user_id: int, vk_link: str) -> bool:
-    """Проверка всеми методами"""
-    methods = [
-        check_like_v1,
-        check_like_v2,
-        check_like_v3,
-        check_like_v4,
-        check_like_v6,
-        check_like_v7,
-    ]
-    
-    for method in methods:
-        try:
-            if method(user_id, vk_link):
-                print(f"   ✅ Лайк найден через {method.__name__}")
-                return True
-        except:
-            continue
-    
-    print(f"   ❌ Лайк не найден ни одним методом")
-    return False
 
 def can_user_post(user_id: int) -> bool:
     global queue
@@ -375,29 +218,28 @@ def get_posts_after_user(user_id: int) -> int:
         return len(queue) - user_posts[-1] - 1
 
 def send_message(peer_id: int, text: str):
-    global vk
-    if vk is None:
+    global vk_group
+    if vk_group is None:
         return None
     try:
         rate_limit()
-        result = vk.messages.send(peer_id=peer_id, message=text, random_id=int(time.time() * 1000))
+        result = vk_group.messages.send(peer_id=peer_id, message=text, random_id=int(time.time() * 1000))
         print(f"✅ Отправлено: {text[:50]}...")
         return result
     except Exception as e:
         print(f"❌ Ошибка отправки: {e}")
         return None
-    sys.stdout.flush()
 
 def delete_message(peer_id: int, message_id: int) -> bool:
-    global vk
-    if vk is None or not message_id:
+    global vk_group
+    if vk_group is None or not message_id:
         return False
     try:
         rate_limit()
         if peer_id >= 2000000000:
-            vk.messages.delete(peer_id=peer_id, cmids=[message_id], delete_for_all=True)
+            vk_group.messages.delete(peer_id=peer_id, cmids=[message_id], delete_for_all=True)
         else:
-            vk.messages.delete(peer_id=peer_id, message_ids=[message_id], delete_for_all=True)
+            vk_group.messages.delete(peer_id=peer_id, message_ids=[message_id], delete_for_all=True)
         return True
     except:
         return False
@@ -414,6 +256,14 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int) -> bool:
                 vip_links.append({'link': vk_link, 'added_by': user_id, 'expires_at': datetime.now() + timedelta(hours=24)})
                 save_vip_links()
             send_message(peer_id, f"⭐ VIP-ссылка добавлена!\n🔗 {make_clickable_link(vk_link)}")
+        return True
+    if text.lower().startswith('!delvip'):
+        parts = text.split()
+        if len(parts) >= 2:
+            with vip_links_lock:
+                vip_links = [v for v in vip_links if v['link'] != parts[1]]
+                save_vip_links()
+            send_message(peer_id, "✅ VIP-ссылка удалена!")
         return True
     if text.lower() == '!vip_list':
         with vip_links_lock:
@@ -512,16 +362,24 @@ def process_message(event):
     send_message(peer_id, f"✅ Опубликовано!\n🔗 {make_clickable_link(vk_link)}")
 
 def main():
-    global vk
+    global vk_group, vk_user
     init_database()
     load_data()
     try:
         print("🔄 Подключение...")
         sys.stdout.flush()
-        vk_session = vk_api.VkApi(token=GROUP_TOKEN)
-        vk = vk_session.get_api()
-        print("✅ VK API подключен")
-        longpoll = VkBotLongPoll(vk_session, GROUP_ID)
+        
+        # Групповой API
+        vk_group_session = vk_api.VkApi(token=GROUP_TOKEN)
+        vk_group = vk_group_session.get_api()
+        print("✅ Групповой API подключен")
+        
+        # Пользовательский API
+        vk_user_session = vk_api.VkApi(token=USER_TOKEN)
+        vk_user = vk_user_session.get_api()
+        print("✅ Пользовательский API подключен")
+        
+        longpoll = VkBotLongPoll(vk_group_session, GROUP_ID)
         print("✅ Long Poll подключен")
         print("=" * 60)
         sys.stdout.flush()
@@ -535,4 +393,7 @@ def main():
         sys.stdout.flush()
 
 if __name__ == "__main__":
+    import sys
+    from datetime import datetime, timedelta
+    import traceback
     main()
