@@ -28,10 +28,10 @@ except ImportError as e:
 # ====================== НАСТРОЙКИ ======================
 GROUP_TOKEN = "vk1.a.jZntWDtqu6rH1vOzLdQYx2cscCiR5Vd5Iw_enxlYXfDnhv_xMnid8zXyjVPmVZ_ZUyH68EmAGplxiyOInoZuZ577wvgabPxo7-zeeKDJoZ3VLxp3QfMEck3LRbQsqj5BTjIXs1i68q9_fpph0W6Dvh24Z2DCSbDz-t_nsjrojFOzWjOSdc479mrwY7y0gzTcpGWIkX6aMUHGEAsMZ0poBA"
 GROUP_ID = 241064421
-CONFIRMATION_CODE = "bfa599f5"
+CONFIRMATION_CODE = "60a08f28"
 PORT = int(os.getenv("PORT", 3000))
 ADMIN_IDS = [447457340]
-DELETE_AFTER = 300  # 5 минут (в секундах)
+DELETE_AFTER = 300  # 5 минут
 # ======================================================
 
 MAX_QUEUE_SIZE = 10
@@ -45,11 +45,9 @@ vip_links = []
 vip_links_lock = threading.Lock()
 vk = None
 
-# Состояния пользователей
 user_states = {}
 states_lock = threading.Lock()
 
-# Защита от дубликатов
 processed_events = set()
 processed_lock = threading.Lock()
 
@@ -185,7 +183,6 @@ def get_posts_after_user(user_id: int) -> int:
         return len(queue) - user_posts[-1] - 1
 
 def send_message(peer_id: int, text: str, delete_after: int = DELETE_AFTER):
-    """Отправка сообщения с авто-удалением"""
     global vk
     if vk is None:
         return None
@@ -194,7 +191,6 @@ def send_message(peer_id: int, text: str, delete_after: int = DELETE_AFTER):
         result = vk.messages.send(peer_id=peer_id, message=text, random_id=int(time.time() * 1000))
         print(f"✅ Отправлено (ID: {result}): {text[:50]}...")
         
-        # Планируем удаление
         if delete_after > 0 and result and result > 0:
             def delete_later():
                 time.sleep(delete_after)
