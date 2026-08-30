@@ -2,21 +2,19 @@ import sys
 import re
 import time
 import sqlite3
-import json
-import os
 from datetime import datetime, timedelta
 import threading
 import traceback
 from typing import Optional, List, Tuple
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
 print("=" * 60)
-print("🚀 БОТ ЗАПУСКАЕТСЯ (Callback API + Reactions + Auto-Delete)...")
+print("🚀 БОТ ЗАПУСКАЕТСЯ (Long Poll + Reactions + Auto-Delete)...")
 print("=" * 60)
 sys.stdout.flush()
 
 try:
     import vk_api
+    from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
     from vk_api.exceptions import ApiError
     print("✅ Библиотека vk-api загружена")
     sys.stdout.flush()
@@ -25,14 +23,10 @@ except ImportError as e:
     sys.stdout.flush()
     raise
 
-# ====================== НАСТРОЙКИ ======================
 GROUP_TOKEN = "vk1.a.jZntWDtqu6rH1vOzLdQYx2cscCiR5Vd5Iw_enxlYXfDnhv_xMnid8zXyjVPmVZ_ZUyH68EmAGplxiyOInoZuZ577wvgabPxo7-zeeKDJoZ3VLxp3QfMEck3LRbQsqj5BTjIXs1i68q9_fpph0W6Dvh24Z2DCSbDz-t_nsjrojFOzWjOSdc479mrwY7y0gzTcpGWIkX6aMUHGEAsMZ0poBA"
 GROUP_ID = 241064421
-CONFIRMATION_CODE = "60a08f28"
-PORT = int(os.getenv("PORT", 3000))
 ADMIN_IDS = [447457340]
-DELETE_AFTER = 300  # 5 минут
-# ======================================================
+DELETE_AFTER = 300
 
 MAX_QUEUE_SIZE = 10
 VIP_DURATION_HOURS = 24
@@ -47,9 +41,6 @@ vk = None
 
 user_states = {}
 states_lock = threading.Lock()
-
-processed_events = set()
-processed_lock = threading.Lock()
 
 def make_clickable_link(vk_link: str) -> str:
     if not vk_link:
@@ -147,19 +138,7 @@ def rate_limit():
 def extract_vk_link(text: str) -> Optional[str]:
     if not text:
         return None
-    patterns = [
-        r'(wall-?\d+_\d+)',
-        r'(photo-?\d+_\d+)',
-        r'(video-?\d+_\d+)',
-        r'(clip-?\d+_\d+)',
-        r'(audio-?\d+_\d+)',
-        r'(topic-?\d+_\d+)',
-        r'(market-?\d+_\d+)',
-        r'(album-?\d+_\d+)',
-        r'(poll-?\d+_\d+)',
-        r'(note-?\d+_\d+)',
-        r'(doc-?\d+_\d+)',
-    ]
+    patterns = [r'(wall-?\d+_\d+)', r'(photo-?\d+_\d+)', r'(video-?\d+_\d+)', r'(clip-?\d+_\d+)', r'(audio-?\d+_\d+)', r'(topic-?\d+_\d+)', r'(market-?\d+_\d+)']
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
@@ -188,21 +167,57 @@ def send_message(peer_id: int, text: str, delete_after: int = DELETE_AFTER):
         return None
     try:
         rate_limit()
-        result = vk.messages.send(peer_id=peer_id, message=text, random_id=int(time.time() * 1000))
+        random_id = int(time.time() * 1000)
+        result = vk.messages.send(peer_id=peer_id, message=text, random_id=random_id)
         print(f"✅ Отправлено (ID: {result}): {text[:50]}...")
         
-        if delete_after > 0 and result and result > 0:
+        if delete_after > 0:
             def delete_later():
                 time.sleep(delete_after)
                 try:
                     rate_limit()
-                    if peer_id >= 2000000000:
-                        vk.messages.delete(peer_id=peer_id, cmids=[result], delete_for_all=True)
-                    else:
-                        vk.messages.delete(peer_id=peer_id, message_ids=[result], delete_for_all=True)
-                    print(f"🗑️ Удалено сообщение бота {result}")
+                    
+                    # Способ 1: по ID
+                    if result and result > 0:
+                        if peer_id >= 2000000000:
+                            vk.messages.delete(peer_id=peer_id, cmids=[result], delete_for_all=True)
+                        else:
+                            vk.messages.delete(peer_id=peer_id, message_ids=[result], delete_for_all=True)
+                        print(f"🗑️ Удалено по ID: {result}")
+                        return
+                    
+                    # Способ 2: поиск в истории
+                    history = vk.messages.getHistory(peer_id=peer_id, count=20)
+                    items = history.get('items', [])
+                    
+                    for msg in items:
+                        if msg.get('random_id') == random_id:
+                            msg_id = msg.get('conversation_message_id', msg.get('id', 0))
+                            if msg_id:
+                                if peer_id >= 2000000000:
+                                    vk.messages.delete(peer_id=peer_id, cmids=[msg_id], delete_for_all=True)
+                                else:
+                                    vk.messages.delete(peer_id=peer_id, message_ids=[msg_id], delete_for_all=True)
+                                print(f"🗑️ Удалено через историю: {msg_id}")
+                                return
+                    
+                    # Способ 3: последнее сообщение бота
+                    for msg in items:
+                        if msg.get('from_id', 0) < 0:
+                            msg_id = msg.get('conversation_message_id', msg.get('id', 0))
+                            if msg_id:
+                                if peer_id >= 2000000000:
+                                    vk.messages.delete(peer_id=peer_id, cmids=[msg_id], delete_for_all=True)
+                                else:
+                                    vk.messages.delete(peer_id=peer_id, message_ids=[msg_id], delete_for_all=True)
+                                print(f"🗑️ Удалено последнее сообщение бота: {msg_id}")
+                                return
+                    
+                    print(f"⚠️ Не найдено сообщение для удаления")
+                    
                 except Exception as e:
                     print(f"⚠️ Не удалось удалить: {e}")
+            
             thread = threading.Thread(target=delete_later, daemon=True)
             thread.start()
         
@@ -239,14 +254,6 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int) -> bool:
                 save_vip_links()
             send_message(peer_id, f"⭐ VIP-ссылка добавлена!\n🔗 {make_clickable_link(vk_link)}")
         return True
-    if text.lower().startswith('!delvip'):
-        parts = text.split()
-        if len(parts) >= 2:
-            with vip_links_lock:
-                vip_links = [v for v in vip_links if v['link'] != parts[1]]
-                save_vip_links()
-            send_message(peer_id, "✅ VIP-ссылка удалена!")
-        return True
     if text.lower() == '!vip_list':
         with vip_links_lock:
             if not vip_links:
@@ -259,14 +266,16 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int) -> bool:
         return True
     return False
 
-def process_message(peer_id: int, user_id: int, text: str, message_id: int, event_id: str = ""):
+def process_message(event):
     global queue
-    
-    with processed_lock:
-        if event_id and event_id in processed_events:
-            return
-        if event_id:
-            processed_events.add(event_id)
+    try:
+        message = event.object.message
+        peer_id = message['peer_id']
+        user_id = message['from_id']
+        text = message.get('text', '').strip()
+        message_id = message.get('conversation_message_id', message.get('id', 0))
+    except:
+        return
     
     print(f"\n📩 {user_id}: {text[:50]}")
     sys.stdout.flush()
@@ -276,7 +285,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
     
     admin = is_admin(user_id)
     
-    if text.lower().startswith('!vip') or text.lower().startswith('!delvip'):
+    if text.lower().startswith('!vip'):
         if message_id:
             delete_message(peer_id, message_id)
         handle_vip_commands(text, user_id, peer_id)
@@ -289,7 +298,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             return
         if message_id:
             delete_message(peer_id, message_id)
-        send_message(peer_id, "🔗 Нужна ссылка на контент ВКонтакте!")
+        send_message(peer_id, "🔗 Нужна ссылка!")
         return
     
     if admin:
@@ -298,27 +307,14 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             if len(queue) > MAX_QUEUE_SIZE:
                 queue.pop(0)
             save_queue()
-        send_message(peer_id, f"✅ Ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}\n📊 В очереди: {len(queue)}")
+        send_message(peer_id, f"✅ Опубликовано!\n🔗 {make_clickable_link(vk_link)}")
         return
     
     if not can_user_post(user_id):
         need = max(0, 5 - get_posts_after_user(user_id))
         if message_id:
             delete_message(peer_id, message_id)
-        send_message(peer_id, f"⏳ Ждем Вас через {need} ссылок!")
-        return
-    
-    with states_lock:
-        state_data = user_states.get(user_id)
-    
-    if state_data and state_data['state'] == 'awaiting_regular':
-        if message_id:
-            delete_message(peer_id, message_id)
-        return
-    
-    if state_data and state_data['state'] == 'awaiting_vip':
-        if message_id:
-            delete_message(peer_id, message_id)
+        send_message(peer_id, f"⏳ Жди {need} постов!")
         return
     
     if message_id:
@@ -331,13 +327,12 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         text = "📋 Обязательно проставь лайки на предыдущие 10 ссылок:\n\n"
         for i, link in enumerate(regular_links, 1):
             text += f"▫️ {make_clickable_link(link)}\n"
-        
         text += f"\n{'─' * 30}\n"
         text += "⏳ На выполнение даётся 5 минут!\n"
         text += "✅ После того, как поставишь лайки, поставь ЛЮБУЮ реакцию на это сообщение и снова отправь свою ссылку.\n\n"
         text += "💎 Хочешь себе статус VIP? Обращайся к администратору: @bellengr"
         
-        bot_msg_id = send_message(peer_id, text, DELETE_AFTER)
+        bot_msg_id = send_message(peer_id, text)
         
         with states_lock:
             user_states[user_id] = {
@@ -346,25 +341,19 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                 'peer_id': peer_id,
                 'bot_msg_id': bot_msg_id
             }
-        
-        print(f"   ⏳ Этап 1: ждем реакцию")
         return
     
-    send_vip_links(peer_id, user_id, vk_link)
-
-def send_vip_links(peer_id: int, user_id: int, vk_link: str):
     with vip_links_lock:
         if vip_links:
             text = "⭐ Теперь проставь лайки на VIP ссылки:\n\n"
-            for i, vip in enumerate(vip_links, 1):
+            for vip in vip_links:
                 text += f"⭐ {make_clickable_link(vip['link'])}\n"
-            
             text += f"\n{'─' * 30}\n"
             text += "⏳ На выполнение даётся 5 минут!\n"
             text += "✅ После того, как поставишь лайки, поставь ЛЮБУЮ реакцию на это сообщение и снова отправь свою ссылку.\n\n"
             text += "💎 Хочешь себе статус VIP? Обращайся к администратору: @bellengr"
             
-            bot_msg_id = send_message(peer_id, text, DELETE_AFTER)
+            bot_msg_id = send_message(peer_id, text)
             
             with states_lock:
                 user_states[user_id] = {
@@ -373,14 +362,8 @@ def send_vip_links(peer_id: int, user_id: int, vk_link: str):
                     'peer_id': peer_id,
                     'bot_msg_id': bot_msg_id
                 }
-            
-            print(f"   ⏳ Этап 2: ждем реакцию на VIP")
             return
     
-    publish_link(peer_id, user_id, vk_link)
-
-def publish_link(peer_id: int, user_id: int, vk_link: str):
-    global queue
     with queue_lock:
         queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now(), 'is_admin_post': 0})
         if len(queue) > MAX_QUEUE_SIZE:
@@ -390,125 +373,101 @@ def publish_link(peer_id: int, user_id: int, vk_link: str):
     text = f"✅ Ваша ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}\n📊 В очереди: {len(queue)}\n\n"
     text += "⏳ Ждем Вас через 5 ссылок!\n\n"
     text += "💎 Хочешь себе статус VIP? Обращайся к администратору: @bellengr"
-    
-    send_message(peer_id, text, DELETE_AFTER)
-    
-    with states_lock:
-        if user_id in user_states:
-            del user_states[user_id]
-    
-    print(f"   ✅ Опубликовано!")
+    send_message(peer_id, text)
 
-def process_reaction(peer_id: int, user_id: int, cmid: int):
+def process_reaction(peer_id: int, user_id: int, message_id: int):
     with states_lock:
         state_data = user_states.get(user_id)
     
     if not state_data:
         return
     
-    if state_data['bot_msg_id'] and cmid == state_data['bot_msg_id']:
+    if state_data['bot_msg_id'] and message_id == state_data['bot_msg_id']:
+        vk_link = state_data['link']
+        
         if state_data['state'] == 'awaiting_regular':
-            send_vip_links(peer_id, user_id, state_data['link'])
-            print(f"   ✅ Реакция на обычные ссылки, отправляем VIP")
+            with vip_links_lock:
+                if vip_links:
+                    text = "⭐ Теперь проставь лайки на VIP ссылки:\n\n"
+                    for vip in vip_links:
+                        text += f"⭐ {make_clickable_link(vip['link'])}\n"
+                    text += f"\n{'─' * 30}\n"
+                    text += "⏳ На выполнение даётся 5 минут!\n"
+                    text += "✅ После того, как поставишь лайки, поставь ЛЮБУЮ реакцию на это сообщение и снова отправь свою ссылку.\n\n"
+                    text += "💎 Хочешь себе статус VIP? Обращайся к администратору: @bellengr"
+                    
+                    bot_msg_id = send_message(peer_id, text)
+                    
+                    user_states[user_id] = {
+                        'state': 'awaiting_vip',
+                        'link': vk_link,
+                        'peer_id': peer_id,
+                        'bot_msg_id': bot_msg_id
+                    }
+                    return
+            
+            with queue_lock:
+                queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now(), 'is_admin_post': 0})
+                if len(queue) > MAX_QUEUE_SIZE:
+                    queue.pop(0)
+                save_queue()
+            
+            text = f"✅ Ваша ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}\n📊 В очереди: {len(queue)}\n\n"
+            text += "⏳ Ждем Вас через 5 ссылок!\n\n"
+            text += "💎 Хочешь себе статус VIP? Обращайся к администратору: @bellengr"
+            send_message(peer_id, text)
+            
+            del user_states[user_id]
         
         elif state_data['state'] == 'awaiting_vip':
-            publish_link(peer_id, user_id, state_data['link'])
-            print(f"   ✅ Реакция на VIP, публикуем")
+            with queue_lock:
+                queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now(), 'is_admin_post': 0})
+                if len(queue) > MAX_QUEUE_SIZE:
+                    queue.pop(0)
+                save_queue()
+            
+            text = f"✅ Ваша ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}\n📊 В очереди: {len(queue)}\n\n"
+            text += "⏳ Ждем Вас через 5 ссылок!\n\n"
+            text += "💎 Хочешь себе статус VIP? Обращайся к администратору: @bellengr"
+            send_message(peer_id, text)
+            
+            del user_states[user_id]
 
-class CallbackHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        body = CONFIRMATION_CODE.encode() if self.path in ['/', '/callback'] else b'Bot is running'
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/plain')
-        self.send_header('Content-Length', str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-    
-    def do_POST(self):
-        length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(length)
-        
-        try:
-            data = json.loads(body)
-            
-            if data.get('type') == 'confirmation':
-                rb = CONFIRMATION_CODE.encode()
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain')
-                self.send_header('Content-Length', str(len(rb)))
-                self.end_headers()
-                self.wfile.write(rb)
-                print(f"🔑 Код подтверждения отправлен", flush=True)
-            
-            elif data.get('type') == 'message_new':
-                msg = data.get('object', {}).get('message', {})
-                event_id = data.get('event_id', '')
-                
-                thread = threading.Thread(target=process_message, args=(
-                    msg.get('peer_id', 0),
-                    msg.get('from_id', 0),
-                    msg.get('text', ''),
-                    msg.get('conversation_message_id', msg.get('id', 0)),
-                    event_id
-                ), daemon=True)
-                thread.start()
-                
-                rb = b'ok'
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain')
-                self.send_header('Content-Length', str(len(rb)))
-                self.end_headers()
-                self.wfile.write(rb)
-            
-            elif data.get('type') == 'message_reaction':
-                obj = data.get('object', {})
-                peer_id = obj.get('peer_id', 0)
-                user_id = obj.get('user_id', 0)
-                cmid = obj.get('cmid', 0)
-                
-                thread = threading.Thread(target=process_reaction, args=(peer_id, user_id, cmid), daemon=True)
-                thread.start()
-                
-                rb = b'ok'
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain')
-                self.send_header('Content-Length', str(len(rb)))
-                self.end_headers()
-                self.wfile.write(rb)
-            
-            else:
-                rb = b'ok'
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain')
-                self.send_header('Content-Length', str(len(rb)))
-                self.end_headers()
-                self.wfile.write(rb)
-        except Exception as e:
-            print(f"❌ Ошибка: {e}", flush=True)
-            rb = b'ok'
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/plain')
-            self.send_header('Content-Length', str(len(rb)))
-            self.end_headers()
-            self.wfile.write(rb)
-    
-    def log_message(self, fmt, *args):
-        pass
-
-if __name__ == "__main__":
+def main():
+    global vk
     init_database()
     load_data()
-    
-    vk_session = vk_api.VkApi(token=GROUP_TOKEN)
-    vk = vk_session.get_api()
-    print("✅ VK API подключен")
-    
-    print(f"📡 Порт: {PORT}")
-    print(f"🔑 Код: {CONFIRMATION_CODE}")
-    print(f"🗑️ Авто-удаление: {DELETE_AFTER} секунд (5 минут)")
-    sys.stdout.flush()
-    
-    server = HTTPServer(('0.0.0.0', PORT), CallbackHandler)
-    print(f"✅ Сервер запущен на 0.0.0.0:{PORT}")
-    sys.stdout.flush()
-    server.serve_forever()
+    try:
+        print("🔄 Подключение...")
+        sys.stdout.flush()
+        vk_session = vk_api.VkApi(token=GROUP_TOKEN)
+        vk = vk_session.get_api()
+        print("✅ VK API подключен")
+        longpoll = VkBotLongPoll(vk_session, GROUP_ID)
+        print("✅ Long Poll подключен")
+        print("=" * 60)
+        print("✅ Реакции через MESSAGE_EVENT")
+        print("✅ Авто-удаление через историю")
+        sys.stdout.flush()
+        
+        for event in longpoll.listen():
+            if event.type == VkBotEventType.MESSAGE_NEW:
+                process_message(event)
+            elif event.type == VkBotEventType.MESSAGE_EVENT:
+                try:
+                    payload = event.object.payload
+                    if payload:
+                        peer_id = event.object.peer_id
+                        user_id = event.object.user_id
+                        message_id = payload.get('cmid', payload.get('message_id', 0))
+                        process_reaction(peer_id, user_id, message_id)
+                        print(f"🔔 Реакция от {user_id} на сообщение {message_id}")
+                except Exception as e:
+                    print(f"⚠️ Ошибка реакции: {e}")
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        traceback.print_exc()
+        sys.stdout.flush()
+
+if __name__ == "__main__":
+    main()
