@@ -2,19 +2,21 @@ import sys
 import re
 import time
 import sqlite3
+import json
+import os
 from datetime import datetime, timedelta
 import threading
 import traceback
 from typing import Optional, List, Tuple
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 print("=" * 60)
-print("🚀 БОТ ЗАПУСКАЕТСЯ (Long Poll + Reactions + Auto-Delete)...")
+print("🚀 БОТ ЗАПУСКАЕТСЯ (Callback API + Reactions + Auto-Delete)...")
 print("=" * 60)
 sys.stdout.flush()
 
 try:
     import vk_api
-    from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
     from vk_api.exceptions import ApiError
     print("✅ Библиотека vk-api загружена")
     sys.stdout.flush()
@@ -25,11 +27,13 @@ except ImportError as e:
 
 GROUP_TOKEN = "vk1.a.jZntWDtqu6rH1vOzLdQYx2cscCiR5Vd5Iw_enxlYXfDnhv_xMnid8zXyjVPmVZ_ZUyH68EmAGplxiyOInoZuZ577wvgabPxo7-zeeKDJoZ3VLxp3QfMEck3LRbQsqj5BTjIXs1i68q9_fpph0W6Dvh24Z2DCSbDz-t_nsjrojFOzWjOSdc479mrwY7y0gzTcpGWIkX6aMUHGEAsMZ0poBA"
 GROUP_ID = 241064421
+CONFIRMATION_CODE = "60a08f28"
+PORT = int(os.getenv("PORT", 3000))
 ADMIN_IDS = [447457340]
-DELETE_AFTER = 300
+DELETE_AFTER = 300  # 5 минут
 
 MAX_QUEUE_SIZE = 10
-VIP_DURATION_HOURS = 24
+VIP_DURATION_HOURS = 24  # VIP-ссылки на 24 часа
 RATE_LIMIT_DELAY = 0.34
 DB_FILE = "bot_database.db"
 
@@ -41,6 +45,13 @@ vk = None
 
 user_states = {}
 states_lock = threading.Lock()
+
+processed_events = set()
+processed_lock = threading.Lock()
+
+# Для удаления сообщений бота
+bot_messages = {}  # {peer_id: [random_ids]}
+bot_messages_lock = threading.Lock()
 
 def make_clickable_link(vk_link: str) -> str:
     if not vk_link:
@@ -132,6 +143,14 @@ def save_vip_links():
     except Exception as e:
         print(f"⚠️ Ошибка сохранения VIP: {e}")
 
+def cleanup_expired_vip():
+    """Очистка просроченных VIP-ссылок"""
+    global vip_links
+    with vip_links_lock:
+        now = datetime.now()
+        vip_links = [v for v in vip_links if v['expires_at'] > now]
+        save_vip_links()
+
 def rate_limit():
     time.sleep(RATE_LIMIT_DELAY)
 
@@ -161,65 +180,74 @@ def get_posts_after_user(user_id: int) -> int:
             return 0
         return len(queue) - user_posts[-1] - 1
 
-def send_message(peer_id: int, text: str, delete_after: int = DELETE_AFTER):
-    global vk
+def send_message(peer_id: int, text: str):
+    """Отправка сообщения с авто-удалением (работает даже при ID=0)"""
+    global vk, bot_messages
     if vk is None:
         return None
+    
+    random_id = int(time.time() * 1000)
+    
     try:
         rate_limit()
-        random_id = int(time.time() * 1000)
         result = vk.messages.send(peer_id=peer_id, message=text, random_id=random_id)
         print(f"✅ Отправлено (ID: {result}): {text[:50]}...")
         
-        if delete_after > 0:
-            def delete_later():
-                time.sleep(delete_after)
-                try:
-                    rate_limit()
-                    
-                    # Способ 1: по ID
-                    if result and result > 0:
-                        if peer_id >= 2000000000:
-                            vk.messages.delete(peer_id=peer_id, cmids=[result], delete_for_all=True)
-                        else:
-                            vk.messages.delete(peer_id=peer_id, message_ids=[result], delete_for_all=True)
-                        print(f"🗑️ Удалено по ID: {result}")
-                        return
-                    
-                    # Способ 2: поиск в истории
-                    history = vk.messages.getHistory(peer_id=peer_id, count=20)
-                    items = history.get('items', [])
-                    
-                    for msg in items:
-                        if msg.get('random_id') == random_id:
-                            msg_id = msg.get('conversation_message_id', msg.get('id', 0))
-                            if msg_id:
-                                if peer_id >= 2000000000:
-                                    vk.messages.delete(peer_id=peer_id, cmids=[msg_id], delete_for_all=True)
-                                else:
-                                    vk.messages.delete(peer_id=peer_id, message_ids=[msg_id], delete_for_all=True)
-                                print(f"🗑️ Удалено через историю: {msg_id}")
-                                return
-                    
-                    # Способ 3: последнее сообщение бота
-                    for msg in items:
-                        if msg.get('from_id', 0) < 0:
-                            msg_id = msg.get('conversation_message_id', msg.get('id', 0))
-                            if msg_id:
-                                if peer_id >= 2000000000:
-                                    vk.messages.delete(peer_id=peer_id, cmids=[msg_id], delete_for_all=True)
-                                else:
-                                    vk.messages.delete(peer_id=peer_id, message_ids=[msg_id], delete_for_all=True)
-                                print(f"🗑️ Удалено последнее сообщение бота: {msg_id}")
-                                return
-                    
-                    print(f"⚠️ Не найдено сообщение для удаления")
-                    
-                except Exception as e:
-                    print(f"⚠️ Не удалось удалить: {e}")
-            
-            thread = threading.Thread(target=delete_later, daemon=True)
-            thread.start()
+        # Сохраняем random_id для удаления
+        with bot_messages_lock:
+            if peer_id not in bot_messages:
+                bot_messages[peer_id] = []
+            bot_messages[peer_id].append({'random_id': random_id, 'text': text[:30]})
+        
+        # Планируем удаление
+        def delete_later():
+            time.sleep(DELETE_AFTER)
+            try:
+                rate_limit()
+                
+                # Способ 1: если result > 0
+                if result and result > 0:
+                    if peer_id >= 2000000000:
+                        vk.messages.delete(peer_id=peer_id, cmids=[result], delete_for_all=True)
+                    else:
+                        vk.messages.delete(peer_id=peer_id, message_ids=[result], delete_for_all=True)
+                    print(f"🗑️ Удалено по ID: {result}")
+                    return
+                
+                # Способ 2: поиск по random_id в истории
+                history = vk.messages.getHistory(peer_id=peer_id, count=20)
+                items = history.get('items', [])
+                
+                for msg in items:
+                    if msg.get('random_id') == random_id:
+                        msg_id = msg.get('conversation_message_id', msg.get('id', 0))
+                        if msg_id:
+                            if peer_id >= 2000000000:
+                                vk.messages.delete(peer_id=peer_id, cmids=[msg_id], delete_for_all=True)
+                            else:
+                                vk.messages.delete(peer_id=peer_id, message_ids=[msg_id], delete_for_all=True)
+                            print(f"🗑️ Удалено через random_id: {msg_id}")
+                            return
+                
+                # Способ 3: последнее сообщение бота
+                for msg in items:
+                    if msg.get('from_id', 0) < 0:
+                        msg_id = msg.get('conversation_message_id', msg.get('id', 0))
+                        if msg_id:
+                            if peer_id >= 2000000000:
+                                vk.messages.delete(peer_id=peer_id, cmids=[msg_id], delete_for_all=True)
+                            else:
+                                vk.messages.delete(peer_id=peer_id, message_ids=[msg_id], delete_for_all=True)
+                            print(f"🗑️ Удалено последнее сообщение бота: {msg_id}")
+                            return
+                
+                print(f"⚠️ Не найдено сообщение для удаления")
+                
+            except Exception as e:
+                print(f"⚠️ Не удалось удалить: {e}")
+        
+        thread = threading.Thread(target=delete_later, daemon=True)
+        thread.start()
         
         return result
     except Exception as e:
@@ -243,6 +271,8 @@ def delete_message(peer_id: int, message_id: int) -> bool:
 
 def handle_vip_commands(text: str, user_id: int, peer_id: int) -> bool:
     global vip_links
+    cleanup_expired_vip()
+    
     if not is_admin(user_id):
         send_message(peer_id, "❌ Только администраторы!")
         return True
@@ -250,32 +280,47 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int) -> bool:
         vk_link = extract_vk_link(text.split()[1])
         if vk_link:
             with vip_links_lock:
-                vip_links.append({'link': vk_link, 'added_by': user_id, 'expires_at': datetime.now() + timedelta(hours=24)})
+                for vip in vip_links:
+                    if vip['link'] == vk_link:
+                        send_message(peer_id, f"⚠️ Ссылка уже в VIP!")
+                        return True
+                vip_links.append({'link': vk_link, 'added_by': user_id, 'expires_at': datetime.now() + timedelta(hours=VIP_DURATION_HOURS)})
                 save_vip_links()
-            send_message(peer_id, f"⭐ VIP-ссылка добавлена!\n🔗 {make_clickable_link(vk_link)}")
+            send_message(peer_id, f"⭐ VIP-ссылка добавлена на 24 часа!\n🔗 {make_clickable_link(vk_link)}")
+        return True
+    if text.lower().startswith('!delvip'):
+        parts = text.split()
+        if len(parts) >= 2:
+            with vip_links_lock:
+                vip_links = [v for v in vip_links if v['link'] != parts[1]]
+                save_vip_links()
+            send_message(peer_id, "✅ VIP-ссылка удалена!")
         return True
     if text.lower() == '!vip_list':
+        cleanup_expired_vip()
         with vip_links_lock:
             if not vip_links:
                 send_message(peer_id, "📭 VIP-ссылок нет")
                 return True
             text = "⭐ VIP-ссылки:\n\n"
+            now = datetime.now()
             for vip in vip_links:
-                text += f"🔗 {make_clickable_link(vip['link'])}\n\n"
+                remaining = vip['expires_at'] - now
+                hours = int(remaining.total_seconds() // 3600)
+                minutes = int((remaining.total_seconds() % 3600) // 60)
+                text += f"🔗 {make_clickable_link(vip['link'])}\n⏳ Осталось: {hours}ч {minutes}мин\n\n"
             send_message(peer_id, text)
         return True
     return False
 
-def process_message(event):
+def process_message(peer_id: int, user_id: int, text: str, message_id: int, event_id: str = ""):
     global queue
-    try:
-        message = event.object.message
-        peer_id = message['peer_id']
-        user_id = message['from_id']
-        text = message.get('text', '').strip()
-        message_id = message.get('conversation_message_id', message.get('id', 0))
-    except:
-        return
+    
+    with processed_lock:
+        if event_id and event_id in processed_events:
+            return
+        if event_id:
+            processed_events.add(event_id)
     
     print(f"\n📩 {user_id}: {text[:50]}")
     sys.stdout.flush()
@@ -285,7 +330,7 @@ def process_message(event):
     
     admin = is_admin(user_id)
     
-    if text.lower().startswith('!vip'):
+    if text.lower().startswith('!vip') or text.lower().startswith('!delvip'):
         if message_id:
             delete_message(peer_id, message_id)
         handle_vip_commands(text, user_id, peer_id)
@@ -343,6 +388,7 @@ def process_message(event):
             }
         return
     
+    cleanup_expired_vip()
     with vip_links_lock:
         if vip_links:
             text = "⭐ Теперь проставь лайки на VIP ссылки:\n\n"
@@ -375,17 +421,23 @@ def process_message(event):
     text += "💎 Хочешь себе статус VIP? Обращайся к администратору: @bellengr"
     send_message(peer_id, text)
 
-def process_reaction(peer_id: int, user_id: int, message_id: int):
+def process_reaction(peer_id: int, user_id: int, cmid: int):
+    print(f"🔔 Реакция от {user_id} на cmid={cmid}")
+    
     with states_lock:
         state_data = user_states.get(user_id)
     
     if not state_data:
+        print(f"   ⚠️ Нет состояния для {user_id}")
         return
     
-    if state_data['bot_msg_id'] and message_id == state_data['bot_msg_id']:
+    print(f"   bot_msg_id={state_data['bot_msg_id']}, cmid={cmid}")
+    
+    if state_data['bot_msg_id'] and cmid == state_data['bot_msg_id']:
         vk_link = state_data['link']
         
         if state_data['state'] == 'awaiting_regular':
+            cleanup_expired_vip()
             with vip_links_lock:
                 if vip_links:
                     text = "⭐ Теперь проставь лайки на VIP ссылки:\n\n"
@@ -432,42 +484,106 @@ def process_reaction(peer_id: int, user_id: int, message_id: int):
             send_message(peer_id, text)
             
             del user_states[user_id]
+    else:
+        print(f"   ❌ cmid не совпадает")
 
-def main():
-    global vk
-    init_database()
-    load_data()
-    try:
-        print("🔄 Подключение...")
-        sys.stdout.flush()
-        vk_session = vk_api.VkApi(token=GROUP_TOKEN)
-        vk = vk_session.get_api()
-        print("✅ VK API подключен")
-        longpoll = VkBotLongPoll(vk_session, GROUP_ID)
-        print("✅ Long Poll подключен")
-        print("=" * 60)
-        print("✅ Реакции через MESSAGE_EVENT")
-        print("✅ Авто-удаление через историю")
-        sys.stdout.flush()
+class CallbackHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = CONFIRMATION_CODE.encode() if self.path in ['/', '/callback'] else b'Bot is running'
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    
+    def do_POST(self):
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length)
         
-        for event in longpoll.listen():
-            if event.type == VkBotEventType.MESSAGE_NEW:
-                process_message(event)
-            elif event.type == VkBotEventType.MESSAGE_EVENT:
-                try:
-                    payload = event.object.payload
-                    if payload:
-                        peer_id = event.object.peer_id
-                        user_id = event.object.user_id
-                        message_id = payload.get('cmid', payload.get('message_id', 0))
-                        process_reaction(peer_id, user_id, message_id)
-                        print(f"🔔 Реакция от {user_id} на сообщение {message_id}")
-                except Exception as e:
-                    print(f"⚠️ Ошибка реакции: {e}")
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
-        traceback.print_exc()
-        sys.stdout.flush()
+        print(f"📥 POST: {body.decode('utf-8')}", flush=True)
+        
+        try:
+            data = json.loads(body)
+            
+            if data.get('type') == 'confirmation':
+                rb = CONFIRMATION_CODE.encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain')
+                self.send_header('Content-Length', str(len(rb)))
+                self.end_headers()
+                self.wfile.write(rb)
+                print(f"🔑 Код подтверждения отправлен", flush=True)
+            
+            elif data.get('type') == 'message_new':
+                msg = data.get('object', {}).get('message', {})
+                event_id = data.get('event_id', '')
+                
+                thread = threading.Thread(target=process_message, args=(
+                    msg.get('peer_id', 0),
+                    msg.get('from_id', 0),
+                    msg.get('text', ''),
+                    msg.get('conversation_message_id', msg.get('id', 0)),
+                    event_id
+                ), daemon=True)
+                thread.start()
+                
+                rb = b'ok'
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain')
+                self.send_header('Content-Length', str(len(rb)))
+                self.end_headers()
+                self.wfile.write(rb)
+            
+            elif data.get('type') == 'message_reaction':
+                obj = data.get('object', {})
+                peer_id = obj.get('peer_id', 0)
+                user_id = obj.get('user_id', 0)
+                cmid = obj.get('cmid', 0)
+                
+                thread = threading.Thread(target=process_reaction, args=(peer_id, user_id, cmid), daemon=True)
+                thread.start()
+                
+                rb = b'ok'
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain')
+                self.send_header('Content-Length', str(len(rb)))
+                self.end_headers()
+                self.wfile.write(rb)
+            
+            else:
+                rb = b'ok'
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain')
+                self.send_header('Content-Length', str(len(rb)))
+                self.end_headers()
+                self.wfile.write(rb)
+        except Exception as e:
+            print(f"❌ Ошибка: {e}", flush=True)
+            rb = b'ok'
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain')
+            self.send_header('Content-Length', str(len(rb)))
+            self.end_headers()
+            self.wfile.write(rb)
+    
+    def log_message(self, fmt, *args):
+        pass
 
 if __name__ == "__main__":
-    main()
+    init_database()
+    load_data()
+    
+    vk_session = vk_api.VkApi(token=GROUP_TOKEN)
+    vk = vk_session.get_api()
+    print("✅ VK API подключен")
+    
+    print(f"📡 Порт: {PORT}")
+    print(f"🔑 Код: {CONFIRMATION_CODE}")
+    print(f"🗑️ Авто-удаление: {DELETE_AFTER} секунд (5 минут)")
+    print(f"⭐ VIP-ссылки на {VIP_DURATION_HOURS} часа")
+    sys.stdout.flush()
+    
+    server = HTTPServer(('0.0.0.0', PORT), CallbackHandler)
+    print(f"✅ Сервер запущен на 0.0.0.0:{PORT}")
+    sys.stdout.flush()
+    server.serve_forever()
