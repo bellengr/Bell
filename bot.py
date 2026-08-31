@@ -35,10 +35,11 @@ PORT = int(os.getenv("PORT", 3000))
 ADMIN_IDS = [447457340]
 DELETE_AFTER = 300
 
-# Для Authorization Code Flow
+# Для Authorization Code Flow — два варианта redirect_uri
 CLIENT_ID = "54738417"
 CLIENT_SECRET = "zlj5FoVckeDTdqDVBX6r"
-REDIRECT_URI = "https://bot-1787897111-3513-bellengr.bothost.tech"
+REDIRECT_URI_1 = "https://bot-1787897111-3513-bellengr.bothost.tech"
+REDIRECT_URI_2 = "https://bot-1787897111-3513-bellengr.bothost.tech/callback"
 
 USER_TOKEN = ""
 
@@ -386,7 +387,6 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                 text += "💎 Хочешь себе статус VIP? Обращайся к администратору: @bellengr"
                 send_message(peer_id, text)
                 return
-            print(f"   ✅ VIP-лайки есть!")
     
     # Проверка лайков на очередь
     with queue_lock:
@@ -408,7 +408,6 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             text += "💎 Хочешь себе статус VIP? Обращайся к администратору: @bellengr"
             send_message(peer_id, text)
             return
-        print(f"   ✅ Все лайки на очередь есть!")
     
     # Публикация
     with queue_lock:
@@ -428,57 +427,59 @@ class CallbackHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         
         if parsed.path == '/auth':
-            auth_url = f"https://oauth.vk.com/authorize?client_id={CLIENT_ID}&display=page&redirect_uri={REDIRECT_URI}&scope=wall,groups,photos,video,audio&response_type=code&v=5.199"
+            # Используем первый redirect_uri
+            auth_url = f"https://oauth.vk.com/authorize?client_id={CLIENT_ID}&display=page&redirect_uri={REDIRECT_URI_1}&scope=wall,groups,photos,video,audio&response_type=code&v=5.199"
             self.send_response(302)
             self.send_header('Location', auth_url)
             self.end_headers()
             print(f"🔑 Перенаправление на VK")
         
         elif parsed.path == '/' or parsed.path == '/callback':
-            # Обработка кода от VK
             query = urllib.parse.parse_qs(parsed.query)
             code = query.get('code', [''])[0]
             
             if code:
-                token_url = "https://oauth.vk.com/access_token"
-                params = {
-                    'client_id': CLIENT_ID,
-                    'client_secret': CLIENT_SECRET,
-                    'redirect_uri': REDIRECT_URI,
-                    'code': code
-                }
+                # Пробуем оба redirect_uri
+                access_token = None
+                error_msg = ""
                 
-                try:
-                    response = requests.get(token_url, params=params)
-                    data = response.json()
-                    
-                    access_token = data.get('access_token', '')
-                    
-                    if access_token:
-                        save_user_token(access_token)
+                for redirect_uri in [REDIRECT_URI_1, REDIRECT_URI_2]:
+                    try:
+                        token_url = "https://oauth.vk.com/access_token"
+                        params = {
+                            'client_id': CLIENT_ID,
+                            'client_secret': CLIENT_SECRET,
+                            'redirect_uri': redirect_uri,
+                            'code': code
+                        }
+                        response = requests.get(token_url, params=params)
+                        data = response.json()
                         
-                        global vk_user
-                        vk_user_session = vk_api.VkApi(token=access_token)
-                        vk_user = vk_user_session.get_api()
-                        
-                        result = f"✅ Токен получен!"
-                        self.send_response(200)
-                        self.send_header('Content-Type', 'text/plain; charset=utf-8')
-                        self.end_headers()
-                        self.wfile.write(result.encode('utf-8'))
-                    else:
-                        error = data.get('error_description', 'Unknown error')
-                        self.send_response(400)
-                        self.send_header('Content-Type', 'text/plain')
-                        self.end_headers()
-                        self.wfile.write(f'Error: {error}'.encode())
-                except Exception as e:
-                    self.send_response(500)
+                        if 'access_token' in data:
+                            access_token = data['access_token']
+                            break
+                        else:
+                            error_msg = data.get('error_description', 'Unknown error')
+                    except Exception as e:
+                        error_msg = str(e)
+                
+                if access_token:
+                    save_user_token(access_token)
+                    global vk_user
+                    vk_user_session = vk_api.VkApi(token=access_token)
+                    vk_user = vk_user_session.get_api()
+                    
+                    result = f"✅ Токен получен и сохранен!"
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                    self.end_headers()
+                    self.wfile.write(result.encode('utf-8'))
+                else:
+                    self.send_response(400)
                     self.send_header('Content-Type', 'text/plain')
                     self.end_headers()
-                    self.wfile.write(f'Error: {e}'.encode())
+                    self.wfile.write(f'Error: {error_msg}'.encode())
             else:
-                # Отдаем код подтверждения Callback API
                 body = CONFIRMATION_CODE.encode()
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/plain')
