@@ -38,10 +38,9 @@ DELETE_AFTER = 300
 # Для Authorization Code Flow
 CLIENT_ID = "54738417"
 CLIENT_SECRET = "zlj5FoVckeDTdqDVBX6r"
-REDIRECT_URI = "https://bot-1787897111-3513-bellengr.bothost.tech/callback"
+REDIRECT_URI = "https://bot-1787897111-3513-bellengr.bothost.tech"
 
-# Пользовательский токен (будет получен через Authorization Code Flow)
-USER_TOKEN = ""  # Заполнится автоматически
+USER_TOKEN = ""
 
 MAX_QUEUE_SIZE = 10
 VIP_DURATION_HOURS = 24
@@ -89,8 +88,7 @@ def init_database():
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_token (
                 id INTEGER PRIMARY KEY,
-                token TEXT NOT NULL,
-                expires_at TEXT
+                token TEXT NOT NULL
             )
         ''')
         conn.commit()
@@ -119,14 +117,11 @@ def load_data():
             if expires_at > now:
                 vip_links.append({'link': row[0], 'added_by': row[1], 'expires_at': expires_at})
         
-        # Загружаем пользовательский токен
         cursor.execute('SELECT token FROM user_token WHERE id = 1')
         token_row = cursor.fetchone()
         if token_row:
             USER_TOKEN = token_row[0]
             print(f"📂 Загружен пользовательский токен")
-        else:
-            print(f"⚠️ Пользовательский токен не найден. Получите его через /auth")
         
         conn.close()
         print(f"📂 Загружено: {len(queue)} ссылок, {len(vip_links)} VIP")
@@ -144,9 +139,9 @@ def save_user_token(token: str):
         cursor.execute('INSERT INTO user_token (id, token) VALUES (1, ?)', (token,))
         conn.commit()
         conn.close()
-        print(f"✅ Токен сохранен в БД")
+        print(f"✅ Токен сохранен")
     except Exception as e:
-        print(f"⚠️ Ошибка сохранения токена: {e}")
+        print(f"⚠️ Ошибка сохранения: {e}")
 
 def save_queue():
     global queue
@@ -218,7 +213,6 @@ def get_content_type(vk_link: str):
     return '', 0, 0
 
 def check_user_like(user_id: int, vk_link: str) -> bool:
-    """Проверка лайка через пользовательский токен"""
     global vk_user
     if vk_user is None:
         print(f"   ⚠️ Пользовательский API не инициализирован")
@@ -373,7 +367,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
     if message_id:
         delete_message(peer_id, message_id)
     
-    # ПРОВЕРКА VIP-ЛАЙКОВ
+    # Проверка VIP-лайков
     cleanup_expired_vip()
     with vip_links_lock:
         if vip_links:
@@ -394,7 +388,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                 return
             print(f"   ✅ VIP-лайки есть!")
     
-    # ПРОВЕРКА ЛАЙКОВ НА ОЧЕРЕДЬ
+    # Проверка лайков на очередь
     with queue_lock:
         regular_links = [item['link'] for item in queue[-10:]]
     
@@ -416,7 +410,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             return
         print(f"   ✅ Все лайки на очередь есть!")
     
-    # ПУБЛИКАЦИЯ
+    # Публикация
     with queue_lock:
         queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now(), 'is_admin_post': 0})
         if len(queue) > MAX_QUEUE_SIZE:
@@ -434,15 +428,14 @@ class CallbackHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         
         if parsed.path == '/auth':
-            # Перенаправление на VK для авторизации
-            auth_url = f"https://oauth.vk.com/authorize?client_id={CLIENT_ID}&display=page&redirect_uri={REDIRECT_URI}&scope=offline,wall,groups,photos,video,audio&response_type=code&v=5.131"
+            auth_url = f"https://oauth.vk.com/authorize?client_id={CLIENT_ID}&display=page&redirect_uri={REDIRECT_URI}&scope=wall,groups,photos,video,audio&response_type=code&v=5.199"
             self.send_response(302)
             self.send_header('Location', auth_url)
             self.end_headers()
-            print(f"🔑 Перенаправление на VK для авторизации")
+            print(f"🔑 Перенаправление на VK")
         
-        elif parsed.path == '/callback':
-            # Получение кода и обмен на токен
+        elif parsed.path == '/' or parsed.path == '/callback':
+            # Обработка кода от VK
             query = urllib.parse.parse_qs(parsed.query)
             code = query.get('code', [''])[0]
             
@@ -460,20 +453,15 @@ class CallbackHandler(BaseHTTPRequestHandler):
                     data = response.json()
                     
                     access_token = data.get('access_token', '')
-                    expires_in = data.get('expires_in', 0)
-                    user_id = data.get('user_id', 0)
                     
                     if access_token:
                         save_user_token(access_token)
                         
-                        # Инициализируем пользовательский API
                         global vk_user
                         vk_user_session = vk_api.VkApi(token=access_token)
                         vk_user = vk_user_session.get_api()
                         
-                        result = f"✅ Токен получен и сохранен!\n\nExpires: {expires_in} секунд (0 = бессрочный)\nUser ID: {user_id}"
-                        print(result)
-                        
+                        result = f"✅ Токен получен!"
                         self.send_response(200)
                         self.send_header('Content-Type', 'text/plain; charset=utf-8')
                         self.end_headers()
@@ -490,18 +478,13 @@ class CallbackHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     self.wfile.write(f'Error: {e}'.encode())
             else:
-                self.send_response(400)
+                # Отдаем код подтверждения Callback API
+                body = CONFIRMATION_CODE.encode()
+                self.send_response(200)
                 self.send_header('Content-Type', 'text/plain')
+                self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
-                self.wfile.write(b'Error: no code')
-        
-        elif parsed.path in ['/', '/callback_api']:
-            body = CONFIRMATION_CODE.encode()
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/plain')
-            self.send_header('Content-Length', str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+                self.wfile.write(body)
         
         else:
             body = b'Bot is running'
@@ -526,7 +509,6 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-Length', str(len(rb)))
                 self.end_headers()
                 self.wfile.write(rb)
-                print(f"🔑 Код подтверждения отправлен", flush=True)
             
             elif event_type == 'message_new':
                 msg = data.get('object', {}).get('message', {})
@@ -571,21 +553,18 @@ if __name__ == "__main__":
     init_database()
     load_data()
     
-    # Групповой API
     vk_group_session = vk_api.VkApi(token=GROUP_TOKEN)
     vk_group = vk_group_session.get_api()
     print("✅ Групповой API подключен")
     
-    # Пользовательский API (если токен есть)
     if USER_TOKEN:
         vk_user_session = vk_api.VkApi(token=USER_TOKEN)
         vk_user = vk_user_session.get_api()
         print("✅ Пользовательский API подключен")
     else:
-        print("⚠️ Пользовательский токен не найден. Откройте /auth для получения")
+        print("⚠️ Токен не найден. Откройте /auth")
     
     print(f"📡 Порт: {PORT}")
-    print(f"🔗 Для получения токена откройте: {REDIRECT_URI.replace('/callback', '/auth')}")
     sys.stdout.flush()
     
     server = HTTPServer(('0.0.0.0', PORT), CallbackHandler)
