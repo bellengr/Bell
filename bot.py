@@ -47,11 +47,9 @@ vip_links_lock = threading.Lock()
 vk_group = None
 vk_user = None
 
-# Для отслеживания активности
 user_activity = {}
 activity_lock = threading.Lock()
 
-# Приветствие
 greeting_timer = None
 greeting_lock = threading.Lock()
 
@@ -274,6 +272,7 @@ def get_posts_after_user(user_id: int) -> int:
         return len(queue) - user_posts[-1] - 1
 
 def send_message(peer_id: int, text: str):
+    """Отправка сообщения с авто-удалением через 5 минут"""
     global vk_group
     if vk_group is None:
         return None
@@ -281,13 +280,13 @@ def send_message(peer_id: int, text: str):
         rate_limit()
         random_id = int(time.time() * 1000)
         result = vk_group.messages.send(peer_id=peer_id, message=text, random_id=random_id)
-        print(f"✅ Отправлено: {text[:50]}...")
+        print(f"✅ Отправлено (random_id: {random_id}): {text[:50]}...")
         
         def delete_later():
             time.sleep(DELETE_AFTER)
             try:
                 rate_limit()
-                history = vk_group.messages.getHistory(peer_id=peer_id, count=20)
+                history = vk_group.messages.getHistory(peer_id=peer_id, count=30)
                 items = history.get('items', [])
                 for msg in items:
                     if msg.get('random_id') == random_id:
@@ -297,10 +296,11 @@ def send_message(peer_id: int, text: str):
                                 vk_group.messages.delete(peer_id=peer_id, cmids=[msg_id], delete_for_all=True)
                             else:
                                 vk_group.messages.delete(peer_id=peer_id, message_ids=[msg_id], delete_for_all=True)
-                            print(f"🗑️ Удалено: {msg_id}")
+                            print(f"🗑️ Удалено сообщение бота: {msg_id}")
                             return
-            except:
-                pass
+                print(f"⚠️ Сообщение не найдено для удаления")
+            except Exception as e:
+                print(f"⚠️ Ошибка удаления: {e}")
         
         thread = threading.Thread(target=delete_later, daemon=True)
         thread.start()
@@ -341,7 +341,6 @@ def schedule_greeting(peer_id: int):
         greeting_timer.start()
 
 def get_inactive_users(peer_id: int) -> str:
-    """Получение неактивных пользователей (не публиковали более 10 дней)"""
     global user_activity
     now = datetime.now()
     inactive = []
@@ -463,8 +462,8 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         send_message(peer_id, "🔗 Сообщение должно содержать только ссылку на контент!")
         return
     
-    # Проверяем, что сообщение содержит ТОЛЬКО ссылку (без текста)
-    if text != vk_link and not text.startswith('https://') and not text.startswith('http://'):
+    # Проверяем, что сообщение содержит ТОЛЬКО ссылку
+    if text != vk_link and not text.startswith('https://vk.com/') and not text.startswith('https://vk.ru/') and not text.startswith('http://vk.com/') and not text.startswith('http://vk.ru/'):
         if admin:
             return
         if message_id:
@@ -488,9 +487,6 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         send_message(peer_id, f"⏳ Ждем Вас через {need} ссылок!")
         return
     
-    if message_id:
-        delete_message(peer_id, message_id)
-    
     # Проверка VIP-лайков
     cleanup_expired_vip()
     with vip_links_lock:
@@ -501,6 +497,8 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                     missing_vip.append(vip['link'])
             
             if missing_vip:
+                if message_id:
+                    delete_message(peer_id, message_id)
                 text = "⭐ Обязательно проставь лайки на VIP ссылки:\n\n"
                 for link in missing_vip:
                     text += f"⭐ {make_clickable_link(link)}\n"
@@ -522,6 +520,8 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                 missing_regular.append(link)
         
         if missing_regular:
+            if message_id:
+                delete_message(peer_id, message_id)
             text = "📋 Обязательно проставь лайки на предыдущие 10 ссылок:\n\n"
             for link in missing_regular:
                 text += f"▫️ {make_clickable_link(link)}\n"
@@ -532,7 +532,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             send_message(peer_id, text)
             return
     
-    # Публикация
+    # Публикация — НЕ удаляем сообщение участника!
     with queue_lock:
         queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now(), 'is_admin_post': 0})
         if len(queue) > MAX_QUEUE_SIZE:
