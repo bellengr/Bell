@@ -29,19 +29,14 @@ except ImportError as e:
 
 # ====================== НАСТРОЙКИ ======================
 GROUP_TOKEN = "vk1.a.jZntWDtqu6rH1vOzLdQYx2cscCiR5Vd5Iw_enxlYXfDnhv_xMnid8zXyjVPmVZ_ZUyH68EmAGplxiyOInoZuZ577wvgabPxo7-zeeKDJoZ3VLxp3QfMEck3LRbQsqj5BTjIXs1i68q9_fpph0W6Dvh24Z2DCSbDz-t_nsjrojFOzWjOSdc479mrwY7y0gzTcpGWIkX6aMUHGEAsMZ0poBA"
+
+USER_TOKEN = "vk1.a.ciunv0EsWpkktoeSRRPGMlKTeRQbm0Ls4A4EpD6LOecsetCb4KEhmijS0oYtCtFdLY8VUx997GYqvT-53wfz90Te4DpZ7YyZ1fD1m9wFd24llkkACW9_1tuJw9wrpqKLKPbDyI-yOmSTrDaRPYcGcRV6i1-5lIR1w6YXHP143Ynge-UufKLd8YT5ekSkNnjPpNqHZ_auSNsdz76UwTmYhA"
+
 GROUP_ID = 241064421
 CONFIRMATION_CODE = "60a08f28"
 PORT = int(os.getenv("PORT", 3000))
 ADMIN_IDS = [447457340]
 DELETE_AFTER = 300
-
-# Для Authorization Code Flow — два варианта redirect_uri
-CLIENT_ID = "54738417"
-CLIENT_SECRET = "zlj5FoVckeDTdqDVBX6r"
-REDIRECT_URI_1 = "https://bot-1787897111-3513-bellengr.bothost.tech"
-REDIRECT_URI_2 = "https://bot-1787897111-3513-bellengr.bothost.tech/callback"
-
-USER_TOKEN = ""
 
 MAX_QUEUE_SIZE = 10
 VIP_DURATION_HOURS = 24
@@ -86,12 +81,6 @@ def init_database():
                 expires_at TEXT NOT NULL
             )
         ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS user_token (
-                id INTEGER PRIMARY KEY,
-                token TEXT NOT NULL
-            )
-        ''')
         conn.commit()
         conn.close()
         print("✅ База данных инициализирована")
@@ -100,7 +89,7 @@ def init_database():
     sys.stdout.flush()
 
 def load_data():
-    global queue, vip_links, USER_TOKEN
+    global queue, vip_links
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
@@ -117,32 +106,11 @@ def load_data():
             expires_at = datetime.fromisoformat(row[2])
             if expires_at > now:
                 vip_links.append({'link': row[0], 'added_by': row[1], 'expires_at': expires_at})
-        
-        cursor.execute('SELECT token FROM user_token WHERE id = 1')
-        token_row = cursor.fetchone()
-        if token_row:
-            USER_TOKEN = token_row[0]
-            print(f"📂 Загружен пользовательский токен")
-        
         conn.close()
         print(f"📂 Загружено: {len(queue)} ссылок, {len(vip_links)} VIP")
     except Exception as e:
         print(f"⚠️ Ошибка загрузки: {e}")
     sys.stdout.flush()
-
-def save_user_token(token: str):
-    global USER_TOKEN
-    USER_TOKEN = token
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM user_token')
-        cursor.execute('INSERT INTO user_token (id, token) VALUES (1, ?)', (token,))
-        conn.commit()
-        conn.close()
-        print(f"✅ Токен сохранен")
-    except Exception as e:
-        print(f"⚠️ Ошибка сохранения: {e}")
 
 def save_queue():
     global queue
@@ -424,76 +392,12 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
 
 class CallbackHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        parsed = urllib.parse.urlparse(self.path)
-        
-        if parsed.path == '/auth':
-            # Используем первый redirect_uri
-            auth_url = f"https://oauth.vk.com/authorize?client_id={CLIENT_ID}&display=page&redirect_uri={REDIRECT_URI_1}&scope=wall,groups,photos,video,audio&response_type=code&v=5.199"
-            self.send_response(302)
-            self.send_header('Location', auth_url)
-            self.end_headers()
-            print(f"🔑 Перенаправление на VK")
-        
-        elif parsed.path == '/' or parsed.path == '/callback':
-            query = urllib.parse.parse_qs(parsed.query)
-            code = query.get('code', [''])[0]
-            
-            if code:
-                # Пробуем оба redirect_uri
-                access_token = None
-                error_msg = ""
-                
-                for redirect_uri in [REDIRECT_URI_1, REDIRECT_URI_2]:
-                    try:
-                        token_url = "https://oauth.vk.com/access_token"
-                        params = {
-                            'client_id': CLIENT_ID,
-                            'client_secret': CLIENT_SECRET,
-                            'redirect_uri': redirect_uri,
-                            'code': code
-                        }
-                        response = requests.get(token_url, params=params)
-                        data = response.json()
-                        
-                        if 'access_token' in data:
-                            access_token = data['access_token']
-                            break
-                        else:
-                            error_msg = data.get('error_description', 'Unknown error')
-                    except Exception as e:
-                        error_msg = str(e)
-                
-                if access_token:
-                    save_user_token(access_token)
-                    global vk_user
-                    vk_user_session = vk_api.VkApi(token=access_token)
-                    vk_user = vk_user_session.get_api()
-                    
-                    result = f"✅ Токен получен и сохранен!"
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'text/plain; charset=utf-8')
-                    self.end_headers()
-                    self.wfile.write(result.encode('utf-8'))
-                else:
-                    self.send_response(400)
-                    self.send_header('Content-Type', 'text/plain')
-                    self.end_headers()
-                    self.wfile.write(f'Error: {error_msg}'.encode())
-            else:
-                body = CONFIRMATION_CODE.encode()
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain')
-                self.send_header('Content-Length', str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-        
-        else:
-            body = b'Bot is running'
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/plain')
-            self.send_header('Content-Length', str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+        body = CONFIRMATION_CODE.encode() if self.path in ['/', '/callback'] else b'Bot is running'
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
     
     def do_POST(self):
         length = int(self.headers.get('Content-Length', 0))
@@ -558,12 +462,9 @@ if __name__ == "__main__":
     vk_group = vk_group_session.get_api()
     print("✅ Групповой API подключен")
     
-    if USER_TOKEN:
-        vk_user_session = vk_api.VkApi(token=USER_TOKEN)
-        vk_user = vk_user_session.get_api()
-        print("✅ Пользовательский API подключен")
-    else:
-        print("⚠️ Токен не найден. Откройте /auth")
+    vk_user_session = vk_api.VkApi(token=USER_TOKEN)
+    vk_user = vk_user_session.get_api()
+    print("✅ Пользовательский API подключен")
     
     print(f"📡 Порт: {PORT}")
     sys.stdout.flush()
