@@ -30,7 +30,7 @@ except ImportError as e:
 # ====================== НАСТРОЙКИ ======================
 GROUP_TOKEN = "vk1.a.jZntWDtqu6rH1vOzLdQYx2cscCiR5Vd5Iw_enxlYXfDnhv_xMnid8zXyjVPmVZ_ZUyH68EmAGplxiyOInoZuZ577wvgabPxo7-zeeKDJoZ3VLxp3QfMEck3LRbQsqj5BTjIXs1i68q9_fpph0W6Dvh24Z2DCSbDz-t_nsjrojFOzWjOSdc479mrwY7y0gzTcpGWIkX6aMUHGEAsMZ0poBA"
 
-USER_TOKEN = "vk1.a.ciunv0EsWpkktoeSRRPGMlKTeRQbm0Ls4A4EpD6LOecsetCb4KEhmijS0oYtCtFdLY8VUx997GYqvT-53wfz90Te4DpZ7YyZ1fD1m9wFd24llkkACW9_1tuJw9wrpqKLKPbDyI-yOmSTrDaRPYcGcRV6i1-5lIR1w6YXHP143Ynge-UufKLd8YT5ekSkNnjPpNqHZ_auSNsdz76UwTmYhA"
+USER_TOKEN = "vk1.a.D_SMkct4GN-Ul6v3iXU95eEIv78-QcxXKctIa0TihI4W3WJhpQ1TJGk8qVelJy-Krh6XiyNZP1dpE-53gxRgSwXANX5PbdQM1kkCPyBF5f2K9XffciXOcuQI-4RQno3n8sJbV_uR3czl_Xx-LjTM6XDG6bLCCnnHq1fQVAbQ51oZYwFNHFQXTuhCrBm7MKF-eSDHepS0xZY1AbYcFFN2nw"
 
 GROUP_ID = 241064421
 CONFIRMATION_CODE = "60a08f28"
@@ -153,7 +153,7 @@ def rate_limit():
 def extract_vk_link(text: str) -> Optional[str]:
     if not text:
         return None
-    patterns = [r'(wall-?\d+_\d+)', r'(photo-?\d+_\d+)', r'(video-?\d+_\d+)', r'(clip-?\d+_\d+)', r'(audio-?\d+_\d+)', r'(topic-?\d+_\d+)', r'(market-?\d+_\d+)']
+    patterns = [r'(wall-?\d+_\d+)', r'(photo-?\d+_\d+)', r'(video-?\d+_\d+)', r'(clip-?\d+_\d+)', r'(audio-?\d+_\d+)', r'(topic-?\d+_\d+)', r'(market-?\d+_\d+)', r'(album-?\d+_\d+)', r'(poll-?\d+_\d+)', r'(note-?\d+_\d+)', r'(doc-?\d+_\d+)']
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
@@ -177,11 +177,16 @@ def get_content_type(vk_link: str):
         return 'video', int(type_and_owner[5:]), item_id
     elif type_and_owner.startswith('clip'):
         return 'video', int(type_and_owner[4:]), item_id
+    elif type_and_owner.startswith('audio'):
+        return 'audio', int(type_and_owner[5:]), item_id
     elif type_and_owner.startswith('market'):
         return 'market', int(type_and_owner[6:]), item_id
+    elif type_and_owner.startswith('topic'):
+        return 'topic', int(type_and_owner[5:]), item_id
     return '', 0, 0
 
 def check_user_like(user_id: int, vk_link: str) -> bool:
+    """Проверка лайка через пользовательский токен"""
     global vk_user
     if vk_user is None:
         print(f"   ⚠️ Пользовательский API не инициализирован")
@@ -284,8 +289,11 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int) -> bool:
                 send_message(peer_id, "📭 VIP-ссылок нет")
                 return True
             text = "⭐ VIP-ссылки:\n\n"
+            now = datetime.now()
             for vip in vip_links:
-                text += f"🔗 {make_clickable_link(vip['link'])}\n\n"
+                remaining = vip['expires_at'] - now
+                hours = int(remaining.total_seconds() // 3600)
+                text += f"🔗 {make_clickable_link(vip['link'])}\n⏳ Осталось: {hours}ч\n\n"
             send_message(peer_id, text)
         return True
     return False
