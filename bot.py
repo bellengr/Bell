@@ -276,34 +276,40 @@ def send_message(peer_id: int, text: str):
     global vk_group
     if vk_group is None:
         return None
+    
     try:
         rate_limit()
         random_id = int(time.time() * 1000)
         result = vk_group.messages.send(peer_id=peer_id, message=text, random_id=random_id)
-        print(f"✅ Отправлено (random_id: {random_id}): {text[:50]}...")
+        print(f"✅ Отправлено: {text[:50]}...")
         
-        def delete_later():
-            time.sleep(DELETE_AFTER)
-            try:
-                rate_limit()
-                history = vk_group.messages.getHistory(peer_id=peer_id, count=30)
-                items = history.get('items', [])
-                for msg in items:
-                    if msg.get('random_id') == random_id:
-                        msg_id = msg.get('conversation_message_id', msg.get('id', 0))
-                        if msg_id:
-                            if peer_id >= 2000000000:
-                                vk_group.messages.delete(peer_id=peer_id, cmids=[msg_id], delete_for_all=True)
-                            else:
-                                vk_group.messages.delete(peer_id=peer_id, message_ids=[msg_id], delete_for_all=True)
-                            print(f"🗑️ Удалено сообщение бота: {msg_id}")
-                            return
-                print(f"⚠️ Сообщение не найдено для удаления")
-            except Exception as e:
-                print(f"⚠️ Ошибка удаления: {e}")
+        # Получаем ID сообщения из истории
+        time.sleep(1)
+        rate_limit()
+        history = vk_group.messages.getHistory(peer_id=peer_id, count=5)
+        items = history.get('items', [])
         
-        thread = threading.Thread(target=delete_later, daemon=True)
-        thread.start()
+        msg_id = None
+        for msg in items:
+            if msg.get('from_id', 0) < 0:
+                msg_id = msg.get('conversation_message_id', msg.get('id', 0))
+                break
+        
+        if msg_id:
+            def delete_later():
+                time.sleep(DELETE_AFTER)
+                try:
+                    rate_limit()
+                    if peer_id >= 2000000000:
+                        vk_group.messages.delete(peer_id=peer_id, cmids=[msg_id], delete_for_all=True)
+                    else:
+                        vk_group.messages.delete(peer_id=peer_id, message_ids=[msg_id], delete_for_all=True)
+                    print(f"🗑️ Удалено сообщение бота: {msg_id}")
+                except Exception as e:
+                    print(f"⚠️ Ошибка удаления: {e}")
+            
+            thread = threading.Thread(target=delete_later, daemon=True)
+            thread.start()
         
         return result
     except Exception as e:
@@ -446,14 +452,12 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
     
     admin = is_admin(user_id)
     
-    # Команды админа
     if text.lower().startswith('!vip') or text.lower().startswith('!delvip') or text.lower() == '!inactive':
         handle_vip_commands(text, user_id, peer_id, message_id)
         return
     
     vk_link = extract_vk_link(text)
     
-    # Если нет ссылки
     if not vk_link:
         if admin:
             return
@@ -463,7 +467,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         return
     
     # Проверяем, что сообщение содержит ТОЛЬКО ссылку
-    if text != vk_link and not text.startswith('https://vk.com/') and not text.startswith('https://vk.ru/') and not text.startswith('http://vk.com/') and not text.startswith('http://vk.ru/'):
+    if text != vk_link and not text.startswith('https://vk.com/') and not text.startswith('https://vk.ru/'):
         if admin:
             return
         if message_id:
@@ -598,7 +602,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(rb)
             
-            elif event_type == 'chat_invite_user':
+            elif event_type in ['chat_invite_user', 'chat_invite_user_by_link']:
                 obj = data.get('object', {})
                 peer_id = obj.get('peer_id', 0)
                 schedule_greeting(peer_id)
