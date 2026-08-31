@@ -305,6 +305,11 @@ def send_message(peer_id: int, text: str):
                     else:
                         vk_group.messages.delete(peer_id=peer_id, message_ids=[msg_id], delete_for_all=True)
                     print(f"🗑️ Удалено сообщение бота: {msg_id}")
+                except ApiError as e:
+                    if e.code == 15:
+                        print(f"ℹ️ Сообщение уже удалено")
+                    else:
+                        print(f"⚠️ Ошибка удаления: {e}")
                 except Exception as e:
                     print(f"⚠️ Ошибка удаления: {e}")
             
@@ -328,6 +333,10 @@ def delete_message(peer_id: int, message_id: int) -> bool:
         else:
             vk_group.messages.delete(peer_id=peer_id, message_ids=[message_id], delete_for_all=True)
         return True
+    except ApiError as e:
+        if e.code == 15:
+            return True
+        return False
     except:
         return False
 
@@ -573,6 +582,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
         try:
             data = json.loads(body)
             event_type = data.get('type', '')
+            print(f"📥 Событие: {event_type}", flush=True)
             
             if event_type == 'confirmation':
                 rb = CONFIRMATION_CODE.encode()
@@ -584,8 +594,22 @@ class CallbackHandler(BaseHTTPRequestHandler):
             
             elif event_type == 'message_new':
                 msg = data.get('object', {}).get('message', {})
-                event_id = data.get('event_id', '')
                 
+                # Проверяем action (вступление в чат)
+                action = msg.get('action', {})
+                if action and action.get('type') in ['chat_invite_user', 'chat_invite_user_by_link']:
+                    peer_id = msg.get('peer_id', 0)
+                    schedule_greeting(peer_id)
+                    print(f"👋 Новый участник! Отправляю приветствие")
+                    rb = b'ok'
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/plain')
+                    self.send_header('Content-Length', str(len(rb)))
+                    self.end_headers()
+                    self.wfile.write(rb)
+                    return
+                
+                event_id = data.get('event_id', '')
                 thread = threading.Thread(target=process_message, args=(
                     msg.get('peer_id', 0),
                     msg.get('from_id', 0),
@@ -606,6 +630,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 obj = data.get('object', {})
                 peer_id = obj.get('peer_id', 0)
                 schedule_greeting(peer_id)
+                print(f"👋 Новый участник! Отправляю приветствие")
                 
                 rb = b'ok'
                 self.send_response(200)
