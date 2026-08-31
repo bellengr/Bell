@@ -282,6 +282,7 @@ def get_posts_after_user(user_id: int) -> int:
         return len(queue) - user_posts[-1] - 1
 
 def send_message(peer_id: int, text: str):
+    """Отправка сообщения с авто-удалением через 5 минут"""
     global vk_group
     if vk_group is None:
         return None
@@ -292,48 +293,39 @@ def send_message(peer_id: int, text: str):
         result = vk_group.messages.send(peer_id=peer_id, message=text, random_id=random_id)
         print(f"✅ Отправлено: {text[:50]}...")
         
-        time.sleep(3)
-        rate_limit()
-        history = vk_group.messages.getHistory(peer_id=peer_id, count=10)
-        items = history.get('items', [])
+        # Планируем удаление
+        def delete_later():
+            time.sleep(DELETE_AFTER)
+            try:
+                rate_limit()
+                history = vk_group.messages.getHistory(peer_id=peer_id, count=10)
+                items = history.get('items', [])
+                
+                for msg in items:
+                    if msg.get('from_id', 0) < 0:
+                        msg_id = msg.get('conversation_message_id', msg.get('id', 0))
+                        if msg_id:
+                            try:
+                                if peer_id >= 2000000000:
+                                    vk_group.messages.delete(peer_id=peer_id, cmids=[msg_id], delete_for_all=True)
+                                else:
+                                    vk_group.messages.delete(peer_id=peer_id, message_ids=[msg_id], delete_for_all=True)
+                                print(f"🗑️ Удалено: {msg_id}")
+                            except ApiError as e:
+                                if e.code == 15:
+                                    print(f"❌ Сообщение НЕ найдено для удаления (ошибка 15)")
+                                else:
+                                    print(f"❌ Ошибка удаления: {e}")
+                            except Exception as e:
+                                print(f"❌ Ошибка удаления: {e}")
+                            return
+                
+                print(f"⚠️ Сообщение не найдено в истории")
+            except Exception as e:
+                print(f"⚠️ Ошибка получения истории: {e}")
         
-        msg_id = None
-        for msg in items:
-            if msg.get('from_id', 0) < 0:
-                msg_id = msg.get('conversation_message_id', msg.get('id', 0))
-                break
-        
-        if msg_id:
-            def delete_later():
-                time.sleep(DELETE_AFTER)
-                try:
-                    rate_limit()
-                    if peer_id >= 2000000000:
-                        vk_group.messages.delete(peer_id=peer_id, cmids=[msg_id], delete_for_all=True)
-                    else:
-                        vk_group.messages.delete(peer_id=peer_id, message_ids=[msg_id], delete_for_all=True)
-                    print(f"🗑️ Удалено: {msg_id}")
-                except ApiError as e:
-                    if e.code == 15:
-                        print(f"ℹ️ Уже удалено")
-                    else:
-                        try:
-                            rate_limit()
-                            vk_group.messages.delete(
-                                peer_id=peer_id,
-                                conversation_message_ids=[msg_id],
-                                delete_for_all=True
-                            )
-                            print(f"🗑️ Удалено (способ 2): {msg_id}")
-                        except:
-                            print(f"⚠️ Ошибка удаления: {e}")
-                except Exception as e:
-                    print(f"⚠️ Ошибка удаления: {e}")
-            
-            thread = threading.Thread(target=delete_later, daemon=True)
-            thread.start()
-        else:
-            print(f"⚠️ ID не найден")
+        thread = threading.Thread(target=delete_later, daemon=True)
+        thread.start()
         
         return result
     except Exception as e:
@@ -354,7 +346,7 @@ def delete_message(peer_id: int, message_id: int) -> bool:
         return True
     except ApiError as e:
         if e.code == 15:
-            return True
+            return False
         return False
     except:
         return False
