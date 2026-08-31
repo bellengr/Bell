@@ -272,7 +272,7 @@ def get_posts_after_user(user_id: int) -> int:
         return len(queue) - user_posts[-1] - 1
 
 def send_message(peer_id: int, text: str):
-    """Отправка сообщения с авто-удалением через 5 минут"""
+    """Отправка сообщения с авто-удалением"""
     global vk_group
     if vk_group is None:
         return None
@@ -283,10 +283,10 @@ def send_message(peer_id: int, text: str):
         result = vk_group.messages.send(peer_id=peer_id, message=text, random_id=random_id)
         print(f"✅ Отправлено: {text[:50]}...")
         
-        # Получаем ID сообщения из истории
-        time.sleep(1)
+        # Ждем 3 секунды, чтобы сообщение появилось в истории
+        time.sleep(3)
         rate_limit()
-        history = vk_group.messages.getHistory(peer_id=peer_id, count=5)
+        history = vk_group.messages.getHistory(peer_id=peer_id, count=10)
         items = history.get('items', [])
         
         msg_id = None
@@ -300,21 +300,34 @@ def send_message(peer_id: int, text: str):
                 time.sleep(DELETE_AFTER)
                 try:
                     rate_limit()
+                    # Способ 1: cmids
                     if peer_id >= 2000000000:
                         vk_group.messages.delete(peer_id=peer_id, cmids=[msg_id], delete_for_all=True)
                     else:
                         vk_group.messages.delete(peer_id=peer_id, message_ids=[msg_id], delete_for_all=True)
-                    print(f"🗑️ Удалено сообщение бота: {msg_id}")
+                    print(f"🗑️ Удалено: {msg_id}")
                 except ApiError as e:
                     if e.code == 15:
-                        print(f"ℹ️ Сообщение уже удалено")
+                        print(f"ℹ️ Уже удалено")
                     else:
-                        print(f"⚠️ Ошибка удаления: {e}")
+                        # Способ 2: conversation_message_ids
+                        try:
+                            rate_limit()
+                            vk_group.messages.delete(
+                                peer_id=peer_id,
+                                conversation_message_ids=[msg_id],
+                                delete_for_all=True
+                            )
+                            print(f"🗑️ Удалено (способ 2): {msg_id}")
+                        except:
+                            print(f"⚠️ Ошибка удаления: {e}")
                 except Exception as e:
                     print(f"⚠️ Ошибка удаления: {e}")
             
             thread = threading.Thread(target=delete_later, daemon=True)
             thread.start()
+        else:
+            print(f"⚠️ ID не найден")
         
         return result
     except Exception as e:
@@ -595,7 +608,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
             elif event_type == 'message_new':
                 msg = data.get('object', {}).get('message', {})
                 
-                # Проверяем action (вступление в чат)
+                # Проверяем action (вступление)
                 action = msg.get('action', {})
                 if action and action.get('type') in ['chat_invite_user', 'chat_invite_user_by_link']:
                     peer_id = msg.get('peer_id', 0)
