@@ -204,7 +204,19 @@ def rate_limit():
 def extract_vk_link(text: str) -> Optional[str]:
     if not text:
         return None
-    patterns = [r'(wall-?\d+_\d+)', r'(photo-?\d+_\d+)', r'(video-?\d+_\d+)', r'(clip-?\d+_\d+)', r'(audio-?\d+_\d+)', r'(topic-?\d+_\d+)', r'(market-?\d+_\d+)', r'(album-?\d+_\d+)', r'(poll-?\d+_\d+)', r'(note-?\d+_\d+)', r'(doc-?\d+_\d+)']
+    patterns = [
+        r'(wall-?\d+_\d+)',
+        r'(photo-?\d+_\d+)',
+        r'(video-?\d+_\d+)',
+        r'(clip-?\d+_\d+)',
+        r'(audio-?\d+_\d+)',
+        r'(topic-?\d+_\d+)',
+        r'(market-?\d+_\d+)',
+        r'(album-?\d+_\d+)',
+        r'(poll-?\d+_\d+)',
+        r'(note-?\d+_\d+)',
+        r'(doc-?\d+_\d+)',
+    ]
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
@@ -237,6 +249,7 @@ def get_content_type(vk_link: str):
     return '', 0, 0
 
 def check_user_like(user_id: int, vk_link: str) -> bool:
+    """Проверка лайка через пользовательский токен"""
     global vk_user
     if vk_user is None:
         return False
@@ -282,8 +295,8 @@ def get_posts_after_user(user_id: int) -> int:
         return len(queue) - user_posts[-1] - 1
 
 def send_message(peer_id: int, text: str):
-    """Отправка сообщения с авто-удалением через 5 минут"""
-    global vk_group
+    """Отправка сообщения с авто-удалением через пользовательский токен"""
+    global vk_group, vk_user
     if vk_group is None:
         return None
     
@@ -293,36 +306,29 @@ def send_message(peer_id: int, text: str):
         result = vk_group.messages.send(peer_id=peer_id, message=text, random_id=random_id)
         print(f"✅ Отправлено: {text[:50]}...")
         
-        # Планируем удаление
+        # Планируем удаление через пользовательский токен
         def delete_later():
             time.sleep(DELETE_AFTER)
             try:
                 rate_limit()
-                history = vk_group.messages.getHistory(peer_id=peer_id, count=10)
+                # Ищем сообщение через пользовательский токен
+                history = vk_user.messages.getHistory(peer_id=peer_id, count=20)
                 items = history.get('items', [])
                 
                 for msg in items:
-                    if msg.get('from_id', 0) < 0:
+                    if msg.get('random_id') == random_id:
                         msg_id = msg.get('conversation_message_id', msg.get('id', 0))
                         if msg_id:
-                            try:
-                                if peer_id >= 2000000000:
-                                    vk_group.messages.delete(peer_id=peer_id, cmids=[msg_id], delete_for_all=True)
-                                else:
-                                    vk_group.messages.delete(peer_id=peer_id, message_ids=[msg_id], delete_for_all=True)
-                                print(f"🗑️ Удалено: {msg_id}")
-                            except ApiError as e:
-                                if e.code == 15:
-                                    print(f"❌ Сообщение НЕ найдено для удаления (ошибка 15)")
-                                else:
-                                    print(f"❌ Ошибка удаления: {e}")
-                            except Exception as e:
-                                print(f"❌ Ошибка удаления: {e}")
+                            if peer_id >= 2000000000:
+                                vk_user.messages.delete(peer_id=peer_id, cmids=[msg_id], delete_for_all=True)
+                            else:
+                                vk_user.messages.delete(peer_id=peer_id, message_ids=[msg_id], delete_for_all=True)
+                            print(f"🗑️ Удалено (user token): {msg_id}")
                             return
                 
-                print(f"⚠️ Сообщение не найдено в истории")
+                print(f"⚠️ Сообщение не найдено")
             except Exception as e:
-                print(f"⚠️ Ошибка получения истории: {e}")
+                print(f"⚠️ Ошибка удаления: {e}")
         
         thread = threading.Thread(target=delete_later, daemon=True)
         thread.start()
@@ -334,20 +340,17 @@ def send_message(peer_id: int, text: str):
     sys.stdout.flush()
 
 def delete_message(peer_id: int, message_id: int) -> bool:
-    global vk_group
-    if vk_group is None or not message_id:
+    """Удаление сообщения через пользовательский токен"""
+    global vk_user
+    if vk_user is None or not message_id:
         return False
     try:
         rate_limit()
         if peer_id >= 2000000000:
-            vk_group.messages.delete(peer_id=peer_id, cmids=[message_id], delete_for_all=True)
+            vk_user.messages.delete(peer_id=peer_id, cmids=[message_id], delete_for_all=True)
         else:
-            vk_group.messages.delete(peer_id=peer_id, message_ids=[message_id], delete_for_all=True)
+            vk_user.messages.delete(peer_id=peer_id, message_ids=[message_id], delete_for_all=True)
         return True
-    except ApiError as e:
-        if e.code == 15:
-            return False
-        return False
     except:
         return False
 
