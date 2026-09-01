@@ -331,11 +331,9 @@ def get_posts_after_user(user_id: int) -> int:
 def vk_api_request(method: str, params: dict) -> dict:
     """
     Выполняет прямой запрос к VK API через HTTP
-    Возвращает словарь с ответом
     """
     url = f"https://api.vk.com/method/{method}"
     
-    # Добавляем обязательные параметры
     params['v'] = VK_API_VERSION
     params['access_token'] = GROUP_TOKEN
     
@@ -354,8 +352,7 @@ def vk_api_request(method: str, params: dict) -> dict:
 
 def send_message(peer_id: int, text: str) -> Optional[int]:
     """
-    Отправка сообщения через прямой HTTP-запрос.
-    Возвращает conversation_message_id для удаления.
+    Отправка сообщения через прямой HTTP-запрос с peer_ids.
     """
     global pending_deletions
     
@@ -363,11 +360,9 @@ def send_message(peer_id: int, text: str) -> Optional[int]:
         rate_limit()
         random_id = int(time.time() * 1000)
         
-        # Экранируем текст для передачи в запросе
-        # Просто передаём как есть, requests сам позаботится об экранировании
-        
+        # Используем peer_ids (с буквой "s") для получения conversation_message_id
         params = {
-            'peer_id': peer_id,
+            'peer_ids': peer_id,
             'message': text,
             'random_id': random_id,
             'group_id': GROUP_ID
@@ -378,23 +373,59 @@ def send_message(peer_id: int, text: str) -> Optional[int]:
         print(f"✅ Отправлено: {text[:50]}...", flush=True)
         print(f"📦 Ответ API: {result}", flush=True)
         
-        # Получаем conversation_message_id из ответа
         conv_msg_id = None
         
+        # При использовании peer_ids ответ приходит как список
         if isinstance(result, list) and len(result) > 0:
-            # Ответ может быть списком для нескольких peer_id
             conv_msg_id = result[0].get('conversation_message_id')
         elif isinstance(result, dict):
             conv_msg_id = result.get('conversation_message_id')
-        elif isinstance(result, int):
-            # Для личных сообщений возвращается просто ID
-            if result != 0:
-                conv_msg_id = result
+        elif isinstance(result, int) and result != 0:
+            conv_msg_id = result
+        
+        # Если не получили через peer_ids, пробуем через execute
+        if not conv_msg_id:
+            print(f"⚠️ Не удалось получить через peer_ids, пробуем execute...", flush=True)
+            
+            # Экранируем текст
+            escaped_text = text.replace('"', '\\"').replace("'", "\\'")
+            
+            # Код для execute
+            code = f'''
+            var result = API.messages.send({{
+                "peer_id": {peer_id},
+                "message": "{escaped_text}",
+                "random_id": {random_id}
+            }});
+            
+            var conv_id = 0;
+            try {{
+                var history = API.messages.getHistory({{
+                    "peer_id": {peer_id},
+                    "count": 1,
+                    "rev": 0
+                }});
+                conv_id = history.items[0].conversation_message_id;
+            }} catch (e) {{
+                conv_id = 0;
+            }}
+            
+            return {{"message_id": result, "conv_message_id": conv_id}};
+            '''
+            
+            exec_result = vk_api_request('execute', {'code': code})
+            print(f"📦 Ответ execute: {exec_result}", flush=True)
+            
+            if isinstance(exec_result, dict):
+                conv_msg_id = exec_result.get('conv_message_id')
+                if not conv_msg_id:
+                    msg_id = exec_result.get('message_id')
+                    if msg_id and msg_id != 0:
+                        conv_msg_id = msg_id
         
         if conv_msg_id:
             print(f"📦 Получен conversation_message_id: {conv_msg_id}", flush=True)
             
-            # Сохраняем для удаления
             with deletions_lock:
                 pending_deletions.append({
                     'peer_id': peer_id,
@@ -406,7 +437,6 @@ def send_message(peer_id: int, text: str) -> Optional[int]:
             return conv_msg_id
         else:
             print(f"⚠️ Не удалось получить conversation_message_id", flush=True)
-            print(f"⚠️ Ответ: {result}", flush=True)
             return None
             
     except Exception as e:
@@ -430,7 +460,6 @@ def delete_message_by_conv_id(peer_id: int, conv_message_id: int) -> bool:
         result = vk_api_request('messages.delete', params)
         
         if result and isinstance(result, dict):
-            # Проверяем результат
             if result.get('status') == 'ok' or result.get('deleted') == 1:
                 print(f"🗑️ Удалено сообщение {conv_message_id}", flush=True)
                 return True
@@ -583,16 +612,10 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
     if user_id < 0:
         return
     
-    # Если сообщение от бота (группы) - игнорируем
-    if user_id < 0:
-        return
-    
-    # Проверяем команды VIP (только для владельца)
     if text.lower().startswith('!vip') or text.lower().startswith('!delvip') or text.lower() == '!inactive':
         handle_vip_commands(text, user_id, peer_id, message_id)
         return
     
-    # Если это владелец - публикуем ссылку без проверок
     if is_owner(user_id):
         vk_link = extract_vk_link(text)
         if vk_link:
@@ -606,24 +629,20 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         else:
             return
     
-    # === ДЛЯ ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ ===
     vk_link = extract_vk_link(text)
     
-    # Если ссылки нет - удаляем сообщение пользователя и отправляем предупреждение
     if not vk_link:
         if message_id:
             delete_message_by_conv_id(peer_id, message_id)
         send_message(peer_id, "🔗 Сообщение должно содержать только ссылку на контент!")
         return
     
-    # Проверяем, что сообщение содержит ТОЛЬКО ссылку
     if text != vk_link and not text.startswith('https://vk.com/') and not text.startswith('https://vk.ru/'):
         if message_id:
             delete_message_by_conv_id(peer_id, message_id)
         send_message(peer_id, "🔗 Сообщение должно содержать ТОЛЬКО ссылку на контент!")
         return
     
-    # Проверяем очередь
     if not can_user_post(user_id):
         need = max(0, 5 - get_posts_after_user(user_id))
         if message_id:
@@ -631,7 +650,6 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         send_message(peer_id, f"⏳ Ждем Вас через {need} ссылок!")
         return
     
-    # Проверяем VIP ссылки
     cleanup_expired_vip()
     with vip_links_lock:
         if vip_links:
@@ -653,7 +671,6 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                 send_message(peer_id, text)
                 return
     
-    # Проверяем обычные ссылки (последние 10)
     with queue_lock:
         regular_links = [item['link'] for item in queue[-10:] if not item.get('is_owner_post', 0)]
     
@@ -676,7 +693,6 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             send_message(peer_id, text)
             return
     
-    # Все проверки пройдены - публикуем ссылку
     with queue_lock:
         queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now(), 'is_owner_post': 0})
         if len(queue) > MAX_QUEUE_SIZE:
@@ -690,11 +706,9 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         }
     save_user_activity(user_id)
     
-    # Удаляем исходное сообщение пользователя
     if message_id:
         delete_message_by_conv_id(peer_id, message_id)
     
-    # Отправляем подтверждение
     text = f"✅ Ваша ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}\n📊 В очереди: {len(queue)}\n\n"
     text += "⏳ Ждем Вас через 5 ссылок!\n\n"
     text += "💎 Хочешь себе статус VIP? Обращайся к владельцу чата"
@@ -730,7 +744,6 @@ class CallbackHandler(BaseHTTPRequestHandler):
             elif event_type == 'message_new':
                 msg = data.get('object', {}).get('message', {})
                 
-                # Проверяем, не новое ли это подключение участника
                 action = msg.get('action', {})
                 if action and action.get('type') in ['chat_invite_user', 'chat_invite_user_by_link']:
                     peer_id = msg.get('peer_id', 0)
