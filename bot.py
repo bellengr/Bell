@@ -609,10 +609,8 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                     queue.pop(0)
                 save_queue()
             send_message(peer_id, f"✅ Ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}")
-            # НЕ УДАЛЯЕМ сообщение владельца со ссылкой
             return
         else:
-            # Текстовые сообщения владельца НЕ удаляем
             return
     
     # === ДЛЯ ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ ===
@@ -640,8 +638,10 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         send_message(peer_id, f"⏳ Ждем Вас через {need} ссылок!")
         return
     
-    # Проверяем VIP ссылки
+    # ===== ПРОВЕРКА VIP ССЫЛОК (всегда проверяем, даже если их нет) =====
     cleanup_expired_vip()
+    
+    vip_links_check_passed = True
     with vip_links_lock:
         if vip_links:
             missing_vip = []
@@ -650,6 +650,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                     missing_vip.append(vip['link'])
             
             if missing_vip:
+                vip_links_check_passed = False
                 if message_id:
                     delete_message_by_conv_id(peer_id, message_id)
                 text = "⭐ Обязательно проставь лайки на VIP ссылки:\n\n"
@@ -662,7 +663,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                 send_message(peer_id, text)
                 return
     
-    # Проверяем обычные ссылки (последние 10)
+    # ===== ПРОВЕРКА ОБЫЧНЫХ ССЫЛОК (ВСЕГДА ПРОВЕРЯЕМ) =====
     with queue_lock:
         regular_links = [item['link'] for item in queue[-10:] if not item.get('is_owner_post', 0)]
     
@@ -701,11 +702,6 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             'post_count': user_activity.get(user_id, {}).get('post_count', 0) + 1
         }
     save_user_activity(user_id)
-    
-    # ===== ВАЖНО: НЕ УДАЛЯЕМ сообщение пользователя со ссылкой! =====
-    # Оно должно остаться в чате, чтобы другие могли поставить лайк
-    # if message_id:
-    #     delete_message_by_conv_id(peer_id, message_id)  # ← ЭТО УБРАНО!
     
     # Отправляем подтверждение
     text = f"✅ Ваша ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}\n📊 В очереди: {len(queue)}\n\n"
