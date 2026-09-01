@@ -394,46 +394,77 @@ def cleanup_worker():
             time.sleep(5)
 
 def send_message(peer_id: int, text: str):
-    """Отправка сообщения с сохранением ID для удаления через USER_TOKEN"""
-    global vk_group, vk_user, pending_deletions
+    """
+    Отправка сообщения с сохранением ID для удаления.
+    Использует message_id из ответа API.
+    """
+    global vk_group, pending_deletions
     if vk_group is None:
         return None
     
     try:
         rate_limit()
         random_id = int(time.time() * 1000)
-        result = vk_group.messages.send(peer_id=peer_id, message=text, random_id=random_id)
+        
+        # Отправляем сообщение
+        result = vk_group.messages.send(
+            peer_id=peer_id, 
+            message=text, 
+            random_id=random_id
+        )
         
         print(f"✅ Отправлено: {text[:50]}...", flush=True)
         
-        # Пытаемся получить ID через пользовательский токен
-        time.sleep(1.5)
-        if vk_user is not None:
-            try:
-                history = vk_user.messages.getHistory(
-                    peer_id=peer_id, 
-                    count=10,
-                    rev=0
-                )
-                items = history.get('items', [])
-                
-                for msg in items:
-                    if msg.get('random_id') == random_id:
-                        msg_id = msg.get('conversation_message_id', msg.get('id', 0))
-                        if msg_id:
-                            print(f"📦 Найден ID через USER_TOKEN: {msg_id}", flush=True)
-                            with deletions_lock:
-                                pending_deletions.append({
-                                    'peer_id': peer_id,
-                                    'message_id': msg_id,
-                                    'created_at': datetime.now()
-                                })
-                                save_bot_message(peer_id, msg_id)
-                            break
-            except Exception as e:
-                print(f"⚠️ Не удалось получить ID через USER_TOKEN: {e}", flush=True)
+        # Пытаемся получить ID из ответа
+        msg_id = None
+        
+        # Если ответ - число (message_id)
+        if isinstance(result, int):
+            msg_id = result
+            print(f"📦 Получен ID из ответа (int): {msg_id}", flush=True)
+        
+        # Если ответ - словарь с message_id
+        elif isinstance(result, dict) and 'message_id' in result:
+            msg_id = result['message_id']
+            print(f"📦 Получен ID из ответа (dict): {msg_id}", flush=True)
+        
+        # Сохраняем ID для удаления
+        if msg_id:
+            with deletions_lock:
+                pending_deletions.append({
+                    'peer_id': peer_id,
+                    'message_id': msg_id,
+                    'created_at': datetime.now()
+                })
+                save_bot_message(peer_id, msg_id)
         else:
-            print(f"⚠️ USER_TOKEN недоступен", flush=True)
+            print(f"⚠️ Не удалось получить ID сообщения. Ответ: {result}", flush=True)
+            
+            # Пытаемся получить ID через историю (если есть доступ)
+            try:
+                if vk_user is not None:
+                    history = vk_user.messages.getHistory(
+                        peer_id=peer_id, 
+                        count=10,
+                        rev=0
+                    )
+                    items = history.get('items', [])
+                    
+                    for msg in items:
+                        if msg.get('random_id') == random_id:
+                            msg_id = msg.get('conversation_message_id', msg.get('id', 0))
+                            if msg_id:
+                                print(f"📦 Найден ID через историю: {msg_id}", flush=True)
+                                with deletions_lock:
+                                    pending_deletions.append({
+                                        'peer_id': peer_id,
+                                        'message_id': msg_id,
+                                        'created_at': datetime.now()
+                                    })
+                                    save_bot_message(peer_id, msg_id)
+                                break
+            except Exception as e:
+                print(f"⚠️ Не удалось получить ID через историю: {e}", flush=True)
         
         return random_id
     except Exception as e:
