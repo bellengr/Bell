@@ -330,12 +330,10 @@ def cleanup_worker():
     """Фоновый воркер для удаления сообщений"""
     global pending_deletions
     print("🔄 Воркер удаления запущен", flush=True)
-    iteration = 0
     
     while True:
         try:
-            iteration += 1
-            print(f"🔍 Проверка #{iteration}: {len(pending_deletions)} сообщений в очереди", flush=True)
+            time.sleep(30)
             
             now = datetime.now()
             to_delete = []
@@ -344,7 +342,6 @@ def cleanup_worker():
                 remaining = []
                 for item in pending_deletions:
                     elapsed = (now - item['created_at']).total_seconds()
-                    print(f"   {item['random_id']}: {elapsed:.0f} сек", flush=True)
                     if elapsed >= DELETE_AFTER:
                         to_delete.append(item)
                     else:
@@ -355,17 +352,28 @@ def cleanup_worker():
                 print(f"🔍 Удаляю {item['random_id']}...", flush=True)
                 try:
                     rate_limit()
-                    vk_group.messages.delete(
-                        peer_id=item['peer_id'],
-                        cmids=[item['random_id']],
-                        delete_for_all=True
-                    )
-                    print(f"🗑️ Удалено: {item['random_id']}", flush=True)
-                    remove_bot_message(item['random_id'])
+                    # Пробуем разные методы удаления
+                    try:
+                        vk_group.messages.delete(
+                            peer_id=item['peer_id'],
+                            conversation_message_ids=[item['random_id']],
+                            delete_for_all=True
+                        )
+                        print(f"🗑️ Удалено (conversation_message_ids): {item['random_id']}", flush=True)
+                        remove_bot_message(item['random_id'])
+                    except Exception as e1:
+                        try:
+                            vk_group.messages.delete(
+                                peer_id=item['peer_id'],
+                                message_ids=[item['random_id']],
+                                delete_for_all=True
+                            )
+                            print(f"🗑️ Удалено (message_ids): {item['random_id']}", flush=True)
+                            remove_bot_message(item['random_id'])
+                        except Exception as e2:
+                            print(f"⚠️ Ошибка удаления {item['random_id']}: {e2}", flush=True)
                 except Exception as e:
-                    print(f"⚠️ Ошибка удаления {item['random_id']}: {e}", flush=True)
-            
-            time.sleep(30)
+                    print(f"⚠️ Ошибка: {e}", flush=True)
         except Exception as e:
             print(f"❌ Ошибка воркера: {e}", flush=True)
             time.sleep(5)
@@ -380,7 +388,10 @@ def send_message(peer_id: int, text: str):
         rate_limit()
         random_id = int(time.time() * 1000)
         result = vk_group.messages.send(peer_id=peer_id, message=text, random_id=random_id)
+        
         print(f"✅ Отправлено (random_id: {random_id}): {text[:50]}...", flush=True)
+        print(f"📦 Ответ VK: {result}", flush=True)
+        print(f"📦 Тип ответа: {type(result)}", flush=True)
         
         with deletions_lock:
             pending_deletions.append({
@@ -735,11 +746,10 @@ if __name__ == "__main__":
     vk_user = vk_user_session.get_api()
     print("✅ Пользовательский API подключен", flush=True)
     
-    # Запускаем воркер удаления
     cleanup_thread = threading.Thread(target=cleanup_worker)
     cleanup_thread.daemon = False
     cleanup_thread.start()
-    print("✅ Воркер удаления запущен в отдельном потоке", flush=True)
+    print("✅ Воркер удаления запущен", flush=True)
     
     print(f"📡 Порт: {PORT}", flush=True)
     sys.stdout.flush()
