@@ -56,6 +56,9 @@ activity_lock = threading.Lock()
 greeting_timer = None
 greeting_lock = threading.Lock()
 
+pending_deletions = []
+deletions_lock = threading.Lock()
+
 def make_clickable_link(vk_link: str) -> str:
     if not vk_link:
         return vk_link
@@ -110,7 +113,7 @@ def init_database():
     sys.stdout.flush()
 
 def load_data():
-    global queue, vip_links, user_activity
+    global queue, vip_links, user_activity, pending_deletions
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
@@ -135,8 +138,16 @@ def load_data():
                 'post_count': row[2]
             }
         
+        cursor.execute('SELECT peer_id, random_id, created_at FROM bot_messages')
+        for row in cursor.fetchall():
+            pending_deletions.append({
+                'peer_id': row[0],
+                'random_id': row[1],
+                'created_at': datetime.fromisoformat(row[2])
+            })
+        
         conn.close()
-        print(f"📂 Загружено: {len(queue)} ссылок, {len(vip_links)} VIP")
+        print(f"📂 Загружено: {len(queue)} ссылок, {len(vip_links)} VIP, {len(pending_deletions)} на удаление")
     except Exception as e:
         print(f"⚠️ Ошибка загрузки: {e}")
     sys.stdout.flush()
@@ -315,31 +326,47 @@ def get_posts_after_user(user_id: int) -> int:
             return 0
         return len(queue) - user_posts[-1] - 1
 
-def schedule_deletion(peer_id: int, random_id: int):
-    """Планирует удаление одного сообщения через 5 минут"""
-    def delete():
-        time.sleep(DELETE_AFTER)
-        print(f"🔍 Удаляю {random_id}...")
+def cleanup_worker():
+    """Фоновый воркер для удаления сообщений через 5 минут"""
+    global pending_deletions
+    print("🔄 Воркер удаления запущен")
+    while True:
         try:
-            rate_limit()
-            vk_group.messages.delete(
-                peer_id=peer_id,
-                cmids=[random_id],
-                delete_for_all=True
-            )
-            print(f"🗑️ Удалено: {random_id}")
-            remove_bot_message(random_id)
+            time.sleep(30)
+            
+            now = datetime.now()
+            to_delete = []
+            
+            with deletions_lock:
+                remaining = []
+                for item in pending_deletions:
+                    elapsed = (now - item['created_at']).total_seconds()
+                    if elapsed >= DELETE_AFTER:
+                        to_delete.append(item)
+                    else:
+                        remaining.append(item)
+                pending_deletions = remaining
+            
+            for item in to_delete:
+                print(f"🔍 Удаляю {item['random_id']}...")
+                try:
+                    rate_limit()
+                    vk_group.messages.delete(
+                        peer_id=item['peer_id'],
+                        cmids=[item['random_id']],
+                        delete_for_all=True
+                    )
+                    print(f"🗑️ Удалено: {item['random_id']}")
+                    remove_bot_message(item['random_id'])
+                except Exception as e:
+                    print(f"⚠️ Ошибка удаления {item['random_id']}: {e}")
         except Exception as e:
-            print(f"⚠️ Ошибка удаления {random_id}: {e}")
-    
-    timer = threading.Timer(DELETE_AFTER, delete)
-    timer.daemon = True
-    timer.start()
-    print(f"⏳ Таймер удаления запущен для {random_id}")
+            print(f"❌ Ошибка воркера: {e}")
+            time.sleep(5)
 
 def send_message(peer_id: int, text: str):
-    """Отправка сообщения с авто-удалением"""
-    global vk_group
+    """Отправка сообщения с сохранением для удаления"""
+    global vk_group, pending_deletions
     if vk_group is None:
         return None
     
@@ -349,9 +376,13 @@ def send_message(peer_id: int, text: str):
         result = vk_group.messages.send(peer_id=peer_id, message=text, random_id=random_id)
         print(f"✅ Отправлено (random_id: {random_id}): {text[:50]}...")
         
-        # Сохраняем и планируем удаление
-        save_bot_message(peer_id, random_id)
-        schedule_deletion(peer_id, random_id)
+        with deletions_lock:
+            pending_deletions.append({
+                'peer_id': peer_id,
+                'random_id': random_id,
+                'created_at': datetime.now()
+            })
+            save_bot_message(peer_id, random_id)
         
         return random_id
     except Exception as e:
@@ -697,6 +728,12 @@ if __name__ == "__main__":
     vk_user_session = vk_api.VkApi(token=USER_TOKEN)
     vk_user = vk_user_session.get_api()
     print("✅ Пользовательский API подключен")
+    
+    # Запускаем воркер удаления в ОТДЕЛЬНОМ НЕ-daemon потоке
+    cleanup_thread = threading.Thread(target=cleanup_worker)
+    cleanup_thread.daemon = False  # ВАЖНО: не daemon!
+    cleanup_thread.start()
+    print("✅ Воркер удаления запущен в отдельном потоке")
     
     print(f"📡 Порт: {PORT}")
     sys.stdout.flush()
