@@ -315,7 +315,7 @@ def check_user_like(user_id: int, vk_link: str) -> bool:
 def can_user_post(user_id: int) -> bool:
     global queue
     with queue_lock:
-        user_posts = [i for i, item in enumerate(queue) if item['user_id'] == user_id and not item.get('is_owner_post', 0)]
+        user_posts = [i for i, item in enumerate(queue) if item['user_id'] == user_id]
         if not user_posts:
             return True
         return len(queue) - user_posts[-1] - 1 >= 5
@@ -323,7 +323,7 @@ def can_user_post(user_id: int) -> bool:
 def get_posts_after_user(user_id: int) -> int:
     global queue
     with queue_lock:
-        user_posts = [i for i, item in enumerate(queue) if item['user_id'] == user_id and not item.get('is_owner_post', 0)]
+        user_posts = [i for i, item in enumerate(queue) if item['user_id'] == user_id]
         if not user_posts:
             return 0
         return len(queue) - user_posts[-1] - 1
@@ -599,18 +599,25 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         handle_vip_commands(text, user_id, peer_id, message_id)
         return
     
-    # Если это владелец - публикуем ссылку без проверок
+    # === ПУБЛИКАЦИЯ ССЫЛКИ АДМИНИСТРАТОРА ===
     if is_owner(user_id):
         vk_link = extract_vk_link(text)
         if vk_link:
             with queue_lock:
-                queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now(), 'is_owner_post': 1})
+                queue.append({
+                    'link': vk_link, 
+                    'user_id': user_id, 
+                    'timestamp': datetime.now(), 
+                    'is_owner_post': 0  # ← ТЕПЕРЬ 0, ссылка в общей очереди
+                })
                 if len(queue) > MAX_QUEUE_SIZE:
                     queue.pop(0)
                 save_queue()
             send_message(peer_id, f"✅ Ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}")
+            # НЕ УДАЛЯЕМ сообщение владельца со ссылкой
             return
         else:
+            # Текстовые сообщения владельца НЕ удаляем
             return
     
     # === ДЛЯ ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ ===
@@ -638,10 +645,9 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         send_message(peer_id, f"⏳ Ждем Вас через {need} ссылок!")
         return
     
-    # ===== ПРОВЕРКА VIP ССЫЛОК (всегда проверяем, даже если их нет) =====
+    # ===== ПРОВЕРКА VIP ССЫЛОК (всегда проверяем) =====
     cleanup_expired_vip()
     
-    vip_links_check_passed = True
     with vip_links_lock:
         if vip_links:
             missing_vip = []
@@ -650,7 +656,6 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                     missing_vip.append(vip['link'])
             
             if missing_vip:
-                vip_links_check_passed = False
                 if message_id:
                     delete_message_by_conv_id(peer_id, message_id)
                 text = "⭐ Обязательно проставь лайки на VIP ссылки:\n\n"
@@ -663,9 +668,9 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                 send_message(peer_id, text)
                 return
     
-    # ===== ПРОВЕРКА ОБЫЧНЫХ ССЫЛОК (ВСЕГДА ПРОВЕРЯЕМ) =====
+    # ===== ПРОВЕРКА ОБЫЧНЫХ ССЫЛОК (ВСЕ ссылки в очереди) =====
     with queue_lock:
-        regular_links = [item['link'] for item in queue[-10:] if not item.get('is_owner_post', 0)]
+        regular_links = [item['link'] for item in queue[-10:]]  # ← УБРАЛИ ФИЛЬТРАЦИЮ
     
     if regular_links:
         missing_regular = []
@@ -702,6 +707,8 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             'post_count': user_activity.get(user_id, {}).get('post_count', 0) + 1
         }
     save_user_activity(user_id)
+    
+    # НЕ УДАЛЯЕМ сообщение пользователя со ссылкой - оно должно остаться в чате
     
     # Отправляем подтверждение
     text = f"✅ Ваша ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}\n📊 В очереди: {len(queue)}\n\n"
