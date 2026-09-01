@@ -66,7 +66,8 @@ def make_clickable_link(vk_link: str) -> str:
         return vk_link
     return f"https://vk.com/{vk_link}"
 
-def is_admin(user_id: int) -> bool:
+def is_owner(user_id: int) -> bool:
+    """Проверка, является ли пользователь владельцем (админом)"""
     return user_id in ADMIN_IDS
 
 def init_database():
@@ -79,7 +80,7 @@ def init_database():
                 link TEXT NOT NULL,
                 user_id INTEGER NOT NULL,
                 timestamp TEXT NOT NULL,
-                is_admin_post INTEGER DEFAULT 0
+                is_owner_post INTEGER DEFAULT 0
             )
         ''')
         cursor.execute('''
@@ -117,11 +118,11 @@ def load_data():
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute('SELECT link, user_id, timestamp, is_admin_post FROM queue ORDER BY id DESC LIMIT ?', (MAX_QUEUE_SIZE,))
+        cursor.execute('SELECT link, user_id, timestamp, is_owner_post FROM queue ORDER BY id DESC LIMIT ?', (MAX_QUEUE_SIZE,))
         rows = cursor.fetchall()
         queue = []
         for row in reversed(rows):
-            queue.append({'link': row[0], 'user_id': row[1], 'timestamp': datetime.fromisoformat(row[2]), 'is_admin_post': row[3] if len(row) > 3 else 0})
+            queue.append({'link': row[0], 'user_id': row[1], 'timestamp': datetime.fromisoformat(row[2]), 'is_owner_post': row[3] if len(row) > 3 else 0})
         cursor.execute('SELECT link, added_by, expires_at FROM vip_links')
         vip_rows = cursor.fetchall()
         vip_links = []
@@ -196,8 +197,8 @@ def save_queue():
         cursor = conn.cursor()
         cursor.execute('DELETE FROM queue')
         for item in queue:
-            cursor.execute('INSERT INTO queue (link, user_id, timestamp, is_admin_post) VALUES (?, ?, ?, ?)',
-                          (item['link'], item['user_id'], item['timestamp'].isoformat(), item.get('is_admin_post', 0)))
+            cursor.execute('INSERT INTO queue (link, user_id, timestamp, is_owner_post) VALUES (?, ?, ?, ?)',
+                          (item['link'], item['user_id'], item['timestamp'].isoformat(), item.get('is_owner_post', 0)))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -313,7 +314,7 @@ def check_user_like(user_id: int, vk_link: str) -> bool:
 def can_user_post(user_id: int) -> bool:
     global queue
     with queue_lock:
-        user_posts = [i for i, item in enumerate(queue) if item['user_id'] == user_id and not item.get('is_admin_post', 0)]
+        user_posts = [i for i, item in enumerate(queue) if item['user_id'] == user_id and not item.get('is_owner_post', 0)]
         if not user_posts:
             return True
         return len(queue) - user_posts[-1] - 1 >= 5
@@ -321,14 +322,50 @@ def can_user_post(user_id: int) -> bool:
 def get_posts_after_user(user_id: int) -> int:
     global queue
     with queue_lock:
-        user_posts = [i for i, item in enumerate(queue) if item['user_id'] == user_id and not item.get('is_admin_post', 0)]
+        user_posts = [i for i, item in enumerate(queue) if item['user_id'] == user_id and not item.get('is_owner_post', 0)]
         if not user_posts:
             return 0
         return len(queue) - user_posts[-1] - 1
 
+def delete_message(peer_id: int, message_id: int) -> bool:
+    """
+    Удаление сообщения через групповой токен (бот администратор беседы)
+    """
+    global vk_group
+    if vk_group is None or not message_id:
+        return False
+    
+    try:
+        rate_limit()
+        if peer_id >= 2000000000:
+            # Беседа
+            vk_group.messages.delete(
+                peer_id=peer_id,
+                cmids=[message_id],
+                delete_for_all=True
+            )
+        else:
+            # Личное сообщение
+            vk_group.messages.delete(
+                peer_id=peer_id,
+                message_ids=[message_id],
+                delete_for_all=True
+            )
+        print(f"🗑️ Удалено сообщение {message_id}", flush=True)
+        return True
+    except ApiError as e:
+        if e.code == 15:
+            print(f"⚠️ Нет прав на удаление {message_id}: {e}", flush=True)
+        else:
+            print(f"⚠️ Ошибка удаления {message_id}: {e}", flush=True)
+        return False
+    except Exception as e:
+        print(f"⚠️ Ошибка удаления {message_id}: {e}", flush=True)
+        return False
+
 def cleanup_worker():
-    """Фоновый воркер для удаления сообщений через пользовательский токен"""
-    global pending_deletions, vk_user
+    """Фоновый воркер для удаления сообщений бота"""
+    global pending_deletions
     print("🔄 Воркер удаления запущен", flush=True)
     
     while True:
@@ -349,45 +386,16 @@ def cleanup_worker():
                 pending_deletions = remaining
             
             for item in to_delete:
-                print(f"🔍 Удаляю сообщение {item['message_id']} в беседе {item['peer_id']}...", flush=True)
-                try:
-                    rate_limit()
-                    # Используем пользовательский токен для удаления
-                    if vk_user is not None:
-                        if item['peer_id'] >= 2000000000:
-                            # Беседа
-                            vk_user.messages.delete(
-                                peer_id=item['peer_id'],
-                                cmids=[item['message_id']],
-                                delete_for_all=True
-                            )
-                        else:
-                            # Личное сообщение
-                            vk_user.messages.delete(
-                                peer_id=item['peer_id'],
-                                message_ids=[item['message_id']],
-                                delete_for_all=True
-                            )
-                        print(f"🗑️ Удалено сообщение {item['message_id']} (через USER_TOKEN)", flush=True)
-                        remove_bot_message(item['message_id'])
-                    else:
-                        print(f"⚠️ USER_TOKEN не инициализирован, невозможно удалить", flush=True)
-                except ApiError as e:
-                    if e.code == 15:  # Access denied
-                        print(f"⚠️ Нет прав на удаление {item['message_id']}: {e}", flush=True)
-                        # Удаляем из БД, чтобы не пытаться снова
-                        remove_bot_message(item['message_id'])
-                    else:
-                        print(f"⚠️ Ошибка удаления {item['message_id']}: {e}", flush=True)
-                except Exception as e:
-                    print(f"⚠️ Ошибка удаления {item['message_id']}: {e}", flush=True)
+                print(f"🔍 Удаляю сообщение {item['message_id']}...", flush=True)
+                if delete_message(item['peer_id'], item['message_id']):
+                    remove_bot_message(item['message_id'])
         except Exception as e:
             print(f"❌ Ошибка воркера: {e}", flush=True)
             time.sleep(5)
 
 def send_message(peer_id: int, text: str):
-    """Отправка сообщения с получением ID из истории через пользовательский токен"""
-    global vk_group, vk_user, pending_deletions
+    """Отправка сообщения с сохранением ID для удаления"""
+    global vk_group, pending_deletions
     if vk_group is None:
         return None
     
@@ -396,80 +404,38 @@ def send_message(peer_id: int, text: str):
         random_id = int(time.time() * 1000)
         result = vk_group.messages.send(peer_id=peer_id, message=text, random_id=random_id)
         
-        print(f"✅ Отправлено (random_id: {random_id}): {text[:50]}...", flush=True)
+        print(f"✅ Отправлено: {text[:50]}...", flush=True)
         
-        # Получаем ID сообщения через пользовательский токен (у него есть права на чтение истории)
-        time.sleep(1.5)
+        # Получаем ID сообщения для последующего удаления
+        time.sleep(1)
         try:
-            if vk_user is not None:
-                history = vk_user.messages.getHistory(
-                    peer_id=peer_id, 
-                    count=10,
-                    rev=0  # Сначала новые
-                )
-                items = history.get('items', [])
-                
-                real_message_id = None
-                for msg in items:
-                    if msg.get('random_id') == random_id:
-                        # Для бесед используем conversation_message_id, для лички - id
-                        real_message_id = msg.get('conversation_message_id', msg.get('id', 0))
+            history = vk_group.messages.getHistory(
+                peer_id=peer_id, 
+                count=5,
+                rev=0
+            )
+            items = history.get('items', [])
+            
+            for msg in items:
+                if msg.get('random_id') == random_id:
+                    msg_id = msg.get('conversation_message_id', msg.get('id', 0))
+                    if msg_id:
+                        print(f"📦 Найден ID: {msg_id}", flush=True)
+                        with deletions_lock:
+                            pending_deletions.append({
+                                'peer_id': peer_id,
+                                'message_id': msg_id,
+                                'created_at': datetime.now()
+                            })
+                            save_bot_message(peer_id, msg_id)
                         break
-                
-                if real_message_id:
-                    print(f"📦 Найден ID в истории через USER_TOKEN: {real_message_id}", flush=True)
-                    with deletions_lock:
-                        pending_deletions.append({
-                            'peer_id': peer_id,
-                            'message_id': real_message_id,
-                            'created_at': datetime.now()
-                        })
-                        save_bot_message(peer_id, real_message_id)
-                else:
-                    print(f"⚠️ ID не найден в истории", flush=True)
-            else:
-                print(f"⚠️ USER_TOKEN не инициализирован, невозможно получить ID", flush=True)
-        except ApiError as e:
-            if e.code == 15:
-                print(f"⚠️ Нет доступа к истории через USER_TOKEN: {e}", flush=True)
-                print(f"⚠️ Сообщение не будет автоматически удалено", flush=True)
-            else:
-                print(f"⚠️ Ошибка истории: {e}", flush=True)
         except Exception as e:
-            print(f"⚠️ Ошибка истории: {e}", flush=True)
+            print(f"⚠️ Не удалось получить ID сообщения: {e}", flush=True)
         
         return random_id
     except Exception as e:
         print(f"❌ Ошибка отправки: {e}")
         return None
-    sys.stdout.flush()
-
-def delete_message(peer_id: int, message_id: int) -> bool:
-    """Удаление сообщения через пользовательский токен"""
-    global vk_user
-    if vk_user is None or not message_id:
-        return False
-    try:
-        rate_limit()
-        if peer_id >= 2000000000:
-            vk_user.messages.delete(
-                peer_id=peer_id, 
-                cmids=[message_id], 
-                delete_for_all=True
-            )
-        else:
-            vk_user.messages.delete(
-                peer_id=peer_id, 
-                message_ids=[message_id], 
-                delete_for_all=True
-            )
-        return True
-    except ApiError as e:
-        if e.code == 15:
-            print(f"⚠️ Нет прав на удаление сообщения {message_id}: {e}", flush=True)
-        return False
-    except:
-        return False
 
 def schedule_greeting(peer_id: int):
     global greeting_timer
@@ -518,13 +484,20 @@ def get_inactive_users(peer_id: int) -> str:
 
 def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) -> bool:
     global vip_links
-    cleanup_expired_vip()
     
-    if not is_admin(user_id):
+    # Только владелец может использовать VIP команды
+    if not is_owner(user_id):
+        # Удаляем сообщение и отправляем предупреждение
         if message_id:
             delete_message(peer_id, message_id)
-        send_message(peer_id, "❌ Только администраторы!")
+        send_message(peer_id, "❌ Только владелец чата может использовать VIP команды!")
         return True
+    
+    # Удаляем сообщение владельца с командой
+    if message_id:
+        delete_message(peer_id, message_id)
+    
+    cleanup_expired_vip()
     
     if text.lower().startswith('!vip '):
         vk_link = extract_vk_link(text.split()[1])
@@ -532,14 +505,10 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) 
             with vip_links_lock:
                 for vip in vip_links:
                     if vip['link'] == vk_link:
-                        if message_id:
-                            delete_message(peer_id, message_id)
                         send_message(peer_id, f"⚠️ Ссылка уже в VIP!")
                         return True
                 vip_links.append({'link': vk_link, 'added_by': user_id, 'expires_at': datetime.now() + timedelta(hours=VIP_DURATION_HOURS)})
                 save_vip_links()
-            if message_id:
-                delete_message(peer_id, message_id)
             send_message(peer_id, f"⭐ VIP-ссылка добавлена на 24 часа!\n🔗 {make_clickable_link(vk_link)}")
         return True
     
@@ -549,16 +518,12 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) 
             with vip_links_lock:
                 vip_links = [v for v in vip_links if v['link'] != parts[1]]
                 save_vip_links()
-            if message_id:
-                delete_message(peer_id, message_id)
             send_message(peer_id, "✅ VIP-ссылка удалена!")
         return True
     
     if text.lower() == '!vip_list':
         with vip_links_lock:
             if not vip_links:
-                if message_id:
-                    delete_message(peer_id, message_id)
                 send_message(peer_id, "📭 VIP-ссылок нет")
                 return True
             text = "⭐ VIP-ссылки:\n\n"
@@ -567,14 +532,10 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) 
                 remaining = vip['expires_at'] - now
                 hours = int(remaining.total_seconds() // 3600)
                 text += f"🔗 {make_clickable_link(vip['link'])}\n⏳ Осталось: {hours}ч\n\n"
-            if message_id:
-                delete_message(peer_id, message_id)
             send_message(peer_id, text)
         return True
     
     if text.lower() == '!inactive':
-        if message_id:
-            delete_message(peer_id, message_id)
         inactive_text = get_inactive_users(peer_id)
         send_message(peer_id, inactive_text)
         return True
@@ -590,39 +551,48 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
     if user_id < 0:
         return
     
-    admin = is_admin(user_id)
-    
+    # Проверяем, не команда ли это VIP (только для владельца)
     if text.lower().startswith('!vip') or text.lower().startswith('!delvip') or text.lower() == '!inactive':
         handle_vip_commands(text, user_id, peer_id, message_id)
         return
     
+    # Если это владелец - обрабатываем особо
+    if is_owner(user_id):
+        vk_link = extract_vk_link(text)
+        if vk_link:
+            # Публикуем ссылку владельца (без проверок)
+            with queue_lock:
+                queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now(), 'is_owner_post': 1})
+                if len(queue) > MAX_QUEUE_SIZE:
+                    queue.pop(0)
+                save_queue()
+            send_message(peer_id, f"✅ Ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}")
+            # НЕ УДАЛЯЕМ сообщение владельца со ссылкой
+            return
+        else:
+            # Текстовые сообщения владельца НЕ удаляем
+            return
+    
+    # === ДЛЯ ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ ===
+    
+    # Проверяем, есть ли ссылка в сообщении
     vk_link = extract_vk_link(text)
     
+    # Если ссылки нет - удаляем сообщение
     if not vk_link:
-        if admin:
-            return
         if message_id:
             delete_message(peer_id, message_id)
         send_message(peer_id, "🔗 Сообщение должно содержать только ссылку на контент!")
         return
     
+    # Проверяем, что сообщение содержит ТОЛЬКО ссылку
     if text != vk_link and not text.startswith('https://vk.com/') and not text.startswith('https://vk.ru/'):
-        if admin:
-            return
         if message_id:
             delete_message(peer_id, message_id)
         send_message(peer_id, "🔗 Сообщение должно содержать ТОЛЬКО ссылку на контент!")
         return
     
-    if admin:
-        with queue_lock:
-            queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now(), 'is_admin_post': 1})
-            if len(queue) > MAX_QUEUE_SIZE:
-                queue.pop(0)
-            save_queue()
-        send_message(peer_id, f"✅ Ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}")
-        return
-    
+    # Проверяем очередь
     if not can_user_post(user_id):
         need = max(0, 5 - get_posts_after_user(user_id))
         if message_id:
@@ -630,6 +600,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         send_message(peer_id, f"⏳ Ждем Вас через {need} ссылок!")
         return
     
+    # Проверяем VIP ссылки
     cleanup_expired_vip()
     with vip_links_lock:
         if vip_links:
@@ -647,12 +618,13 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                 text += f"\n{'─' * 30}\n"
                 text += "⏳ На выполнение даётся 5 минут!\n"
                 text += "✅ После того, как поставишь лайки, отправь свою ссылку снова.\n\n"
-                text += "💎 Хочешь себе статус VIP? Обращайся к администратору: @bellengr"
+                text += "💎 Хочешь себе статус VIP? Обращайся к владельцу чата"
                 send_message(peer_id, text)
                 return
     
+    # Проверяем обычные ссылки (последние 10)
     with queue_lock:
-        regular_links = [item['link'] for item in queue[-10:]]
+        regular_links = [item['link'] for item in queue[-10:] if not item.get('is_owner_post', 0)]
     
     if regular_links:
         missing_regular = []
@@ -669,12 +641,13 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             text += f"\n{'─' * 30}\n"
             text += "⏳ На выполнение даётся 5 минут!\n"
             text += "✅ После того, как поставишь лайки, отправь свою ссылку снова.\n\n"
-            text += "💎 Хочешь себе статус VIP? Обращайся к администратору: @bellengr"
+            text += "💎 Хочешь себе статус VIP? Обращайся к владельцу чата"
             send_message(peer_id, text)
             return
     
+    # Все проверки пройдены - публикуем ссылку
     with queue_lock:
-        queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now(), 'is_admin_post': 0})
+        queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now(), 'is_owner_post': 0})
         if len(queue) > MAX_QUEUE_SIZE:
             queue.pop(0)
         save_queue()
@@ -686,9 +659,14 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         }
     save_user_activity(user_id)
     
+    # Удаляем исходное сообщение пользователя (оно было ссылкой)
+    if message_id:
+        delete_message(peer_id, message_id)
+    
+    # Отправляем подтверждение
     text = f"✅ Ваша ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}\n📊 В очереди: {len(queue)}\n\n"
     text += "⏳ Ждем Вас через 5 ссылок!\n\n"
-    text += "💎 Хочешь себе статус VIP? Обращайся к администратору: @bellengr"
+    text += "💎 Хочешь себе статус VIP? Обращайся к владельцу чата"
     send_message(peer_id, text)
     print(f"   ✅ Опубликовано!", flush=True)
 
@@ -721,6 +699,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
             elif event_type == 'message_new':
                 msg = data.get('object', {}).get('message', {})
                 
+                # Проверяем, не новое ли это подключение участника
                 action = msg.get('action', {})
                 if action and action.get('type') in ['chat_invite_user', 'chat_invite_user_by_link']:
                     peer_id = msg.get('peer_id', 0)
