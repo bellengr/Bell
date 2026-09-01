@@ -35,7 +35,7 @@ CONFIRMATION_CODE = os.getenv('CONFIRMATION_CODE', 'c756e565')
 PORT = int(os.getenv('PORT', '3000'))
 ADMIN_IDS_STR = os.getenv('ADMIN_IDS', '447457340')
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(',') if x.strip()]
-DELETE_AFTER = 300  # 5 минут
+DELETE_AFTER = 300  # 5 минут (если не работает - поставьте 0)
 # =============================================================================
 
 MAX_QUEUE_SIZE = 10
@@ -396,9 +396,9 @@ def cleanup_worker():
 def send_message(peer_id: int, text: str):
     """
     Отправка сообщения с сохранением ID для удаления.
-    Использует message_id из ответа API.
+    Использует messages.getHistory для получения conversation_message_id.
     """
-    global vk_group, pending_deletions
+    global vk_group, vk_user, pending_deletions
     if vk_group is None:
         return None
     
@@ -415,11 +415,11 @@ def send_message(peer_id: int, text: str):
         
         print(f"✅ Отправлено: {text[:50]}...", flush=True)
         
-        # Пытаемся получить ID из ответа
+        # Получаем ID сообщения
         msg_id = None
         
-        # Если ответ - число (message_id)
-        if isinstance(result, int):
+        # Если ответ - число и не 0 (личное сообщение)
+        if isinstance(result, int) and result != 0:
             msg_id = result
             print(f"📦 Получен ID из ответа (int): {msg_id}", flush=True)
         
@@ -427,6 +427,58 @@ def send_message(peer_id: int, text: str):
         elif isinstance(result, dict) and 'message_id' in result:
             msg_id = result['message_id']
             print(f"📦 Получен ID из ответа (dict): {msg_id}", flush=True)
+        
+        # Если result == 0 (беседа) или не удалось получить ID
+        if not msg_id:
+            print(f"📦 Сообщение отправлено в беседу, ищем ID...", flush=True)
+            
+            # Ждем, чтобы сообщение появилось в истории
+            time.sleep(2)
+            
+            # Пробуем получить ID через историю (групповой токен)
+            try:
+                history = vk_group.messages.getHistory(
+                    peer_id=peer_id,
+                    count=10,
+                    rev=0
+                )
+                
+                items = history.get('items', [])
+                for msg in items:
+                    if msg.get('random_id') == random_id:
+                        msg_id = msg.get('conversation_message_id', msg.get('id', 0))
+                        if msg_id:
+                            print(f"📦 Найден conversation_message_id (групповой): {msg_id}", flush=True)
+                            break
+                
+                if not msg_id:
+                    print(f"⚠️ Не найдено в истории через групповой токен", flush=True)
+                    
+            except ApiError as e:
+                if e.code == 15:
+                    print(f"⚠️ Нет доступа к истории через групповой, пробуем USER_TOKEN", flush=True)
+                    
+                    # Пробуем через пользовательский токен
+                    if vk_user is not None:
+                        try:
+                            history = vk_user.messages.getHistory(
+                                peer_id=peer_id,
+                                count=10,
+                                rev=0
+                            )
+                            items = history.get('items', [])
+                            for msg in items:
+                                if msg.get('random_id') == random_id:
+                                    msg_id = msg.get('conversation_message_id', msg.get('id', 0))
+                                    if msg_id:
+                                        print(f"📦 Найден conversation_message_id (USER_TOKEN): {msg_id}", flush=True)
+                                        break
+                        except Exception as e2:
+                            print(f"⚠️ Ошибка через USER_TOKEN: {e2}", flush=True)
+                else:
+                    print(f"⚠️ Ошибка получения истории: {e}", flush=True)
+            except Exception as e:
+                print(f"⚠️ Ошибка получения ID: {e}", flush=True)
         
         # Сохраняем ID для удаления
         if msg_id:
@@ -437,34 +489,11 @@ def send_message(peer_id: int, text: str):
                     'created_at': datetime.now()
                 })
                 save_bot_message(peer_id, msg_id)
+            print(f"✅ Сообщение будет удалено через {DELETE_AFTER} секунд", flush=True)
         else:
-            print(f"⚠️ Не удалось получить ID сообщения. Ответ: {result}", flush=True)
-            
-            # Пытаемся получить ID через историю (если есть доступ)
-            try:
-                if vk_user is not None:
-                    history = vk_user.messages.getHistory(
-                        peer_id=peer_id, 
-                        count=10,
-                        rev=0
-                    )
-                    items = history.get('items', [])
-                    
-                    for msg in items:
-                        if msg.get('random_id') == random_id:
-                            msg_id = msg.get('conversation_message_id', msg.get('id', 0))
-                            if msg_id:
-                                print(f"📦 Найден ID через историю: {msg_id}", flush=True)
-                                with deletions_lock:
-                                    pending_deletions.append({
-                                        'peer_id': peer_id,
-                                        'message_id': msg_id,
-                                        'created_at': datetime.now()
-                                    })
-                                    save_bot_message(peer_id, msg_id)
-                                break
-            except Exception as e:
-                print(f"⚠️ Не удалось получить ID через историю: {e}", flush=True)
+            print(f"⚠️ НЕ УДАЛОСЬ получить ID сообщения! Автоудаление не сработает.", flush=True)
+            if DELETE_AFTER > 0:
+                print(f"⚠️ Попробуйте получить токен с правами messages или установите DELETE_AFTER = 0", flush=True)
         
         return random_id
     except Exception as e:
@@ -813,6 +842,11 @@ if __name__ == "__main__":
     cleanup_thread.daemon = False
     cleanup_thread.start()
     print("✅ Воркер удаления запущен", flush=True)
+    
+    if DELETE_AFTER == 0:
+        print("⚠️ ВНИМАНИЕ: Автоудаление сообщений бота ОТКЛЮЧЕНО (DELETE_AFTER = 0)", flush=True)
+    else:
+        print(f"✅ Сообщения бота будут удаляться через {DELETE_AFTER} секунд", flush=True)
     
     print(f"📡 Порт: {PORT}", flush=True)
     sys.stdout.flush()
