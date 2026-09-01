@@ -594,10 +594,12 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
     if user_id < 0:
         return
     
+    # Проверяем команды VIP (только для владельца)
     if text.lower().startswith('!vip') or text.lower().startswith('!delvip') or text.lower() == '!inactive':
         handle_vip_commands(text, user_id, peer_id, message_id)
         return
     
+    # Если это владелец - публикуем ссылку без проверок
     if is_owner(user_id):
         vk_link = extract_vk_link(text)
         if vk_link:
@@ -607,24 +609,30 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                     queue.pop(0)
                 save_queue()
             send_message(peer_id, f"✅ Ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}")
+            # НЕ УДАЛЯЕМ сообщение владельца со ссылкой
             return
         else:
+            # Текстовые сообщения владельца НЕ удаляем
             return
     
+    # === ДЛЯ ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ ===
     vk_link = extract_vk_link(text)
     
+    # Если ссылки нет - удаляем сообщение пользователя и отправляем предупреждение
     if not vk_link:
         if message_id:
             delete_message_by_conv_id(peer_id, message_id)
         send_message(peer_id, "🔗 Сообщение должно содержать только ссылку на контент!")
         return
     
+    # Проверяем, что сообщение содержит ТОЛЬКО ссылку
     if text != vk_link and not text.startswith('https://vk.com/') and not text.startswith('https://vk.ru/'):
         if message_id:
             delete_message_by_conv_id(peer_id, message_id)
         send_message(peer_id, "🔗 Сообщение должно содержать ТОЛЬКО ссылку на контент!")
         return
     
+    # Проверяем очередь
     if not can_user_post(user_id):
         need = max(0, 5 - get_posts_after_user(user_id))
         if message_id:
@@ -632,6 +640,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         send_message(peer_id, f"⏳ Ждем Вас через {need} ссылок!")
         return
     
+    # Проверяем VIP ссылки
     cleanup_expired_vip()
     with vip_links_lock:
         if vip_links:
@@ -653,6 +662,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                 send_message(peer_id, text)
                 return
     
+    # Проверяем обычные ссылки (последние 10)
     with queue_lock:
         regular_links = [item['link'] for item in queue[-10:] if not item.get('is_owner_post', 0)]
     
@@ -675,12 +685,16 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             send_message(peer_id, text)
             return
     
+    # ========== ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ - ПУБЛИКУЕМ ССЫЛКУ ==========
+    
+    # Добавляем ссылку в очередь
     with queue_lock:
         queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now(), 'is_owner_post': 0})
         if len(queue) > MAX_QUEUE_SIZE:
             queue.pop(0)
         save_queue()
     
+    # Сохраняем активность пользователя
     with activity_lock:
         user_activity[user_id] = {
             'last_post_time': datetime.now(),
@@ -688,9 +702,12 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         }
     save_user_activity(user_id)
     
-    if message_id:
-        delete_message_by_conv_id(peer_id, message_id)
+    # ===== ВАЖНО: НЕ УДАЛЯЕМ сообщение пользователя со ссылкой! =====
+    # Оно должно остаться в чате, чтобы другие могли поставить лайк
+    # if message_id:
+    #     delete_message_by_conv_id(peer_id, message_id)  # ← ЭТО УБРАНО!
     
+    # Отправляем подтверждение
     text = f"✅ Ваша ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}\n📊 В очереди: {len(queue)}\n\n"
     text += "⏳ Ждем Вас через 5 ссылок!\n\n"
     text += "💎 Хочешь себе статус VIP? Обращайся к владельцу чата"
