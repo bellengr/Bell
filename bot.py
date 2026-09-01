@@ -53,9 +53,6 @@ vk_user = None
 user_activity = {}
 activity_lock = threading.Lock()
 
-greeting_timer = None
-greeting_lock = threading.Lock()
-
 pending_deletions = []
 deletions_lock = threading.Lock()
 
@@ -483,21 +480,6 @@ def cleanup_worker():
             print(f"❌ Ошибка воркера: {e}", flush=True)
             time.sleep(5)
 
-def schedule_greeting(peer_id: int):
-    global greeting_timer
-    def send_greeting():
-        time.sleep(3)
-        text = "👋 Приветствуем Вас в чате B E L L | like!\n\n"
-        text += "Это чат по взаимным лайкам на Ваши посты.\n"
-        text += "Перед отправкой ссылки в чат - прочитайте закрепленное сообщение, это очень важно!"
-        send_message(peer_id, text)
-    
-    with greeting_lock:
-        if greeting_timer and greeting_timer.is_alive():
-            greeting_timer.cancel()
-        greeting_timer = threading.Thread(target=send_greeting, daemon=True)
-        greeting_timer.start()
-
 def get_inactive_users(peer_id: int) -> str:
     global user_activity
     now = datetime.now()
@@ -608,16 +590,14 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                     'link': vk_link, 
                     'user_id': user_id, 
                     'timestamp': datetime.now(), 
-                    'is_owner_post': 0  # ← ТЕПЕРЬ 0, ссылка в общей очереди
+                    'is_owner_post': 0  # Ссылка в общей очереди
                 })
                 if len(queue) > MAX_QUEUE_SIZE:
                     queue.pop(0)
                 save_queue()
             send_message(peer_id, f"✅ Ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}")
-            # НЕ УДАЛЯЕМ сообщение владельца со ссылкой
             return
         else:
-            # Текстовые сообщения владельца НЕ удаляем
             return
     
     # === ДЛЯ ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ ===
@@ -670,7 +650,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
     
     # ===== ПРОВЕРКА ОБЫЧНЫХ ССЫЛОК (ВСЕ ссылки в очереди) =====
     with queue_lock:
-        regular_links = [item['link'] for item in queue[-10:]]  # ← УБРАЛИ ФИЛЬТРАЦИЮ
+        regular_links = [item['link'] for item in queue[-10:]]
     
     if regular_links:
         missing_regular = []
@@ -746,11 +726,10 @@ class CallbackHandler(BaseHTTPRequestHandler):
             elif event_type == 'message_new':
                 msg = data.get('object', {}).get('message', {})
                 
+                # Проверяем, не является ли сообщение системным (вступление участника)
                 action = msg.get('action', {})
                 if action and action.get('type') in ['chat_invite_user', 'chat_invite_user_by_link']:
-                    peer_id = msg.get('peer_id', 0)
-                    schedule_greeting(peer_id)
-                    print(f"👋 Новый участник! Отправляю приветствие", flush=True)
+                    # Приветствие отключено
                     rb = b'ok'
                     self.send_response(200)
                     self.send_header('Content-Type', 'text/plain')
@@ -777,11 +756,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 self.wfile.write(rb)
             
             elif event_type in ['chat_invite_user', 'chat_invite_user_by_link']:
-                obj = data.get('object', {})
-                peer_id = obj.get('peer_id', 0)
-                schedule_greeting(peer_id)
-                print(f"👋 Новый участник! Отправляю приветствие", flush=True)
-                
+                # Приветствие отключено
                 rb = b'ok'
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/plain')
