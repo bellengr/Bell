@@ -29,7 +29,7 @@ except ImportError as e:
 
 # ====================== НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ======================
 GROUP_TOKEN = os.getenv('GROUP_TOKEN', '')
-USER_TOKEN = os.getenv('USER_TOKEN', '')  # ← СЮДА НОВЫЙ ТОКЕН
+USER_TOKEN = os.getenv('USER_TOKEN', '')
 GROUP_ID = int(os.getenv('GROUP_ID', '241064421'))
 CONFIRMATION_CODE = os.getenv('CONFIRMATION_CODE', 'c756e565')
 PORT = int(os.getenv('PORT', '3000'))
@@ -59,9 +59,6 @@ greeting_lock = threading.Lock()
 pending_deletions = []
 deletions_lock = threading.Lock()
 
-# Флаг для отслеживания доступа к истории
-HAS_HISTORY_ACCESS = False
-
 def make_clickable_link(vk_link: str) -> str:
     if not vk_link:
         return vk_link
@@ -70,7 +67,6 @@ def make_clickable_link(vk_link: str) -> str:
     return f"https://vk.com/{vk_link}"
 
 def is_owner(user_id: int) -> bool:
-    """Проверка, является ли пользователь владельцем (админом)"""
     return user_id in ADMIN_IDS
 
 def init_database():
@@ -331,9 +327,6 @@ def get_posts_after_user(user_id: int) -> int:
         return len(queue) - user_posts[-1] - 1
 
 def delete_message(peer_id: int, message_id: int) -> bool:
-    """
-    Удаление сообщения через групповой токен (бот администратор беседы)
-    """
     global vk_group
     if vk_group is None or not message_id:
         return False
@@ -341,14 +334,12 @@ def delete_message(peer_id: int, message_id: int) -> bool:
     try:
         rate_limit()
         if peer_id >= 2000000000:
-            # Беседа
             vk_group.messages.delete(
                 peer_id=peer_id,
                 cmids=[message_id],
                 delete_for_all=True
             )
         else:
-            # Личное сообщение
             vk_group.messages.delete(
                 peer_id=peer_id,
                 message_ids=[message_id],
@@ -367,7 +358,6 @@ def delete_message(peer_id: int, message_id: int) -> bool:
         return False
 
 def cleanup_worker():
-    """Фоновый воркер для удаления сообщений бота"""
     global pending_deletions
     print("🔄 Воркер удаления запущен", flush=True)
     
@@ -397,31 +387,18 @@ def cleanup_worker():
             time.sleep(5)
 
 def send_message(peer_id: int, text: str):
-    """
-    Отправка сообщения с сохранением ID для удаления.
-    Использует пользовательский токен для получения conversation_message_id.
-    """
-    global vk_group, vk_user, pending_deletions, HAS_HISTORY_ACCESS
+    global vk_group, vk_user, pending_deletions
     if vk_group is None:
         return None
     
     try:
         rate_limit()
         random_id = int(time.time() * 1000)
-        
-        # Отправляем сообщение через групповой токен
-        result = vk_group.messages.send(
-            peer_id=peer_id, 
-            message=text, 
-            random_id=random_id
-        )
+        vk_group.messages.send(peer_id=peer_id, message=text, random_id=random_id)
         
         print(f"✅ Отправлено: {text[:50]}...", flush=True)
         
-        # Получаем ID сообщения через пользовательский токен (есть доступ к истории)
-        msg_id = None
-        
-        if HAS_HISTORY_ACCESS and vk_user is not None:
+        if vk_user is not None:
             time.sleep(1.5)
             try:
                 history = vk_user.messages.getHistory(
@@ -436,72 +413,22 @@ def send_message(peer_id: int, text: str):
                         msg_id = msg.get('conversation_message_id', msg.get('id', 0))
                         if msg_id:
                             print(f"📦 Найден conversation_message_id: {msg_id}", flush=True)
-                            break
+                            with deletions_lock:
+                                pending_deletions.append({
+                                    'peer_id': peer_id,
+                                    'message_id': msg_id,
+                                    'created_at': datetime.now()
+                                })
+                                save_bot_message(peer_id, msg_id)
+                            print(f"✅ Сообщение будет удалено через {DELETE_AFTER} секунд", flush=True)
+                        break
             except Exception as e:
                 print(f"⚠️ Ошибка получения ID через USER_TOKEN: {e}", flush=True)
-        else:
-            # Если нет доступа к истории, пробуем через групповой
-            try:
-                history = vk_group.messages.getHistory(
-                    peer_id=peer_id, 
-                    count=10,
-                    rev=0
-                )
-                items = history.get('items', [])
-                
-                for msg in items:
-                    if msg.get('random_id') == random_id:
-                        msg_id = msg.get('conversation_message_id', msg.get('id', 0))
-                        if msg_id:
-                            print(f"📦 Найден conversation_message_id (групповой): {msg_id}", flush=True)
-                            break
-            except Exception as e:
-                print(f"⚠️ Ошибка получения ID через групповой: {e}", flush=True)
-        
-        # Сохраняем ID для удаления
-        if msg_id:
-            with deletions_lock:
-                pending_deletions.append({
-                    'peer_id': peer_id,
-                    'message_id': msg_id,
-                    'created_at': datetime.now()
-                })
-                save_bot_message(peer_id, msg_id)
-            print(f"✅ Сообщение будет удалено через {DELETE_AFTER} секунд", flush=True)
-        else:
-            print(f"⚠️ НЕ УДАЛОСЬ получить ID сообщения!", flush=True)
         
         return random_id
     except Exception as e:
         print(f"❌ Ошибка отправки: {e}")
         return None
-
-def check_history_access():
-    """Проверяет, есть ли доступ к истории сообщений у пользовательского токена"""
-    global HAS_HISTORY_ACCESS, vk_user
-    if vk_user is None:
-        return False
-    
-    try:
-        # Пробуем получить историю
-        test = vk_user.messages.getHistory(
-            peer_id=2000000001,  # тестовый ID
-            count=1
-        )
-        HAS_HISTORY_ACCESS = True
-        print("✅ ЕСТЬ доступ к истории сообщений (USER_TOKEN)", flush=True)
-        return True
-    except ApiError as e:
-        if e.code == 15:
-            print("❌ НЕТ доступа к истории сообщений (нужны права messages)", flush=True)
-        else:
-            print(f"⚠️ Ошибка проверки доступа к истории: {e}", flush=True)
-        HAS_HISTORY_ACCESS = False
-        return False
-    except Exception as e:
-        print(f"⚠️ Ошибка проверки: {e}", flush=True)
-        HAS_HISTORY_ACCESS = False
-        return False
 
 def schedule_greeting(peer_id: int):
     global greeting_timer
@@ -551,15 +478,12 @@ def get_inactive_users(peer_id: int) -> str:
 def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) -> bool:
     global vip_links
     
-    # Только владелец может использовать VIP команды
     if not is_owner(user_id):
-        # Удаляем сообщение и отправляем предупреждение
         if message_id:
             delete_message(peer_id, message_id)
         send_message(peer_id, "❌ Только владелец чата может использовать VIP команды!")
         return True
     
-    # Удаляем сообщение владельца с командой
     if message_id:
         delete_message(peer_id, message_id)
     
@@ -617,48 +541,37 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
     if user_id < 0:
         return
     
-    # Проверяем, не команда ли это VIP (только для владельца)
     if text.lower().startswith('!vip') or text.lower().startswith('!delvip') or text.lower() == '!inactive':
         handle_vip_commands(text, user_id, peer_id, message_id)
         return
     
-    # Если это владелец - обрабатываем особо
     if is_owner(user_id):
         vk_link = extract_vk_link(text)
         if vk_link:
-            # Публикуем ссылку владельца (без проверок)
             with queue_lock:
                 queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now(), 'is_owner_post': 1})
                 if len(queue) > MAX_QUEUE_SIZE:
                     queue.pop(0)
                 save_queue()
             send_message(peer_id, f"✅ Ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}")
-            # НЕ УДАЛЯЕМ сообщение владельца со ссылкой
             return
         else:
-            # Текстовые сообщения владельца НЕ удаляем
             return
     
-    # === ДЛЯ ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ ===
-    
-    # Проверяем, есть ли ссылка в сообщении
     vk_link = extract_vk_link(text)
     
-    # Если ссылки нет - удаляем сообщение
     if not vk_link:
         if message_id:
             delete_message(peer_id, message_id)
         send_message(peer_id, "🔗 Сообщение должно содержать только ссылку на контент!")
         return
     
-    # Проверяем, что сообщение содержит ТОЛЬКО ссылку
     if text != vk_link and not text.startswith('https://vk.com/') and not text.startswith('https://vk.ru/'):
         if message_id:
             delete_message(peer_id, message_id)
         send_message(peer_id, "🔗 Сообщение должно содержать ТОЛЬКО ссылку на контент!")
         return
     
-    # Проверяем очередь
     if not can_user_post(user_id):
         need = max(0, 5 - get_posts_after_user(user_id))
         if message_id:
@@ -666,7 +579,6 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         send_message(peer_id, f"⏳ Ждем Вас через {need} ссылок!")
         return
     
-    # Проверяем VIP ссылки
     cleanup_expired_vip()
     with vip_links_lock:
         if vip_links:
@@ -688,7 +600,6 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                 send_message(peer_id, text)
                 return
     
-    # Проверяем обычные ссылки (последние 10)
     with queue_lock:
         regular_links = [item['link'] for item in queue[-10:] if not item.get('is_owner_post', 0)]
     
@@ -711,7 +622,6 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             send_message(peer_id, text)
             return
     
-    # Все проверки пройдены - публикуем ссылку
     with queue_lock:
         queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now(), 'is_owner_post': 0})
         if len(queue) > MAX_QUEUE_SIZE:
@@ -725,11 +635,9 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         }
     save_user_activity(user_id)
     
-    # Удаляем исходное сообщение пользователя (оно было ссылкой)
     if message_id:
         delete_message(peer_id, message_id)
     
-    # Отправляем подтверждение
     text = f"✅ Ваша ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}\n📊 В очереди: {len(queue)}\n\n"
     text += "⏳ Ждем Вас через 5 ссылок!\n\n"
     text += "💎 Хочешь себе статус VIP? Обращайся к владельцу чата"
@@ -765,7 +673,6 @@ class CallbackHandler(BaseHTTPRequestHandler):
             elif event_type == 'message_new':
                 msg = data.get('object', {}).get('message', {})
                 
-                # Проверяем, не новое ли это подключение участника
                 action = msg.get('action', {})
                 if action and action.get('type') in ['chat_invite_user', 'chat_invite_user_by_link']:
                     peer_id = msg.get('peer_id', 0)
@@ -841,21 +748,10 @@ if __name__ == "__main__":
     vk_user = vk_user_session.get_api()
     print("✅ Пользовательский API подключен", flush=True)
     
-    # Проверяем доступ к истории
-    check_history_access()
-    
     cleanup_thread = threading.Thread(target=cleanup_worker)
     cleanup_thread.daemon = False
     cleanup_thread.start()
     print("✅ Воркер удаления запущен", flush=True)
-    
-    if DELETE_AFTER == 0:
-        print("⚠️ ВНИМАНИЕ: Автоудаление сообщений бота ОТКЛЮЧЕНО (DELETE_AFTER = 0)", flush=True)
-    elif HAS_HISTORY_ACCESS:
-        print(f"✅ Сообщения бота будут удаляться через {DELETE_AFTER} секунд", flush=True)
-    else:
-        print(f"⚠️ НЕТ ДОСТУПА К ИСТОРИИ! Сообщения бота НЕ будут удаляться.", flush=True)
-        print(f"⚠️ Установите DELETE_AFTER = 0 или получите токен с правами messages", flush=True)
     
     print(f"📡 Порт: {PORT}", flush=True)
     sys.stdout.flush()
