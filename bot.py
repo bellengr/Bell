@@ -56,7 +56,6 @@ activity_lock = threading.Lock()
 greeting_timer = None
 greeting_lock = threading.Lock()
 
-# Очередь на удаление
 pending_deletions = []
 deletions_lock = threading.Lock()
 cleanup_timer = None
@@ -343,7 +342,6 @@ def send_message(peer_id: int, text: str):
         
         print(f"✅ Отправлено (random_id: {random_id}): {text[:50]}...")
         
-        # Сохраняем для удаления
         with deletions_lock:
             pending_deletions.append({
                 'peer_id': peer_id,
@@ -352,7 +350,6 @@ def send_message(peer_id: int, text: str):
             })
             save_bot_message(peer_id, random_id)
         
-        # Запускаем таймер очистки
         start_cleanup_timer()
         
         return random_id
@@ -363,13 +360,14 @@ def send_message(peer_id: int, text: str):
 
 def start_cleanup_timer():
     """Запуск общего таймера для удаления сообщений"""
-    global cleanup_timer
+    global cleanup_timer, pending_deletions
     
     with cleanup_timer_lock:
         if cleanup_timer and cleanup_timer.is_alive():
             return
         
         def cleanup_loop():
+            global pending_deletions
             while True:
                 time.sleep(60)
                 
