@@ -370,6 +370,7 @@ def start_cleanup_timer():
             global pending_deletions
             while True:
                 time.sleep(60)
+                print(f"🔍 Проверка удаления: {len(pending_deletions)} сообщений в очереди")
                 
                 with deletions_lock:
                     now = datetime.now()
@@ -378,6 +379,7 @@ def start_cleanup_timer():
                     
                     for item in pending_deletions:
                         elapsed = (now - item['created_at']).total_seconds()
+                        print(f"   Сообщение {item['random_id']}: {elapsed:.0f} сек")
                         if elapsed >= DELETE_AFTER:
                             to_delete.append(item)
                         else:
@@ -386,6 +388,7 @@ def start_cleanup_timer():
                     pending_deletions = remaining
                 
                 for item in to_delete:
+                    print(f"🔍 Удаляю {item['random_id']}...")
                     try:
                         rate_limit()
                         vk_group.messages.delete(
