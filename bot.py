@@ -59,6 +59,8 @@ greeting_lock = threading.Lock()
 pending_deletions = []
 deletions_lock = threading.Lock()
 
+VK_API_VERSION = "5.131"
+
 def make_clickable_link(vk_link: str) -> str:
     if not vk_link:
         return vk_link
@@ -102,7 +104,6 @@ def init_database():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 peer_id INTEGER NOT NULL,
                 conv_message_id INTEGER NOT NULL,
-                message_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL
             )
         ''')
@@ -139,13 +140,12 @@ def load_data():
                 'post_count': row[2]
             }
         
-        cursor.execute('SELECT peer_id, conv_message_id, message_id, created_at FROM bot_messages')
+        cursor.execute('SELECT peer_id, conv_message_id, created_at FROM bot_messages')
         for row in cursor.fetchall():
             pending_deletions.append({
                 'peer_id': row[0],
                 'conv_message_id': row[1],
-                'message_id': row[2],
-                'created_at': datetime.fromisoformat(row[3])
+                'created_at': datetime.fromisoformat(row[2])
             })
         
         conn.close()
@@ -154,12 +154,12 @@ def load_data():
         print(f"⚠️ Ошибка загрузки: {e}")
     sys.stdout.flush()
 
-def save_bot_message(peer_id: int, conv_message_id: int, message_id: int):
+def save_bot_message(peer_id: int, conv_message_id: int):
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute('INSERT INTO bot_messages (peer_id, conv_message_id, message_id, created_at) VALUES (?, ?, ?, ?)',
-                      (peer_id, conv_message_id, message_id, datetime.now().isoformat()))
+        cursor.execute('INSERT INTO bot_messages (peer_id, conv_message_id, created_at) VALUES (?, ?, ?)',
+                      (peer_id, conv_message_id, datetime.now().isoformat()))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -328,61 +328,122 @@ def get_posts_after_user(user_id: int) -> int:
             return 0
         return len(queue) - user_posts[-1] - 1
 
-def get_message_id_by_conv_id(peer_id: int, conv_message_id: int) -> Optional[int]:
+def vk_api_request(method: str, params: dict) -> dict:
     """
-    Получение ID сообщения для бота через getByConversationMessageId
+    Выполняет прямой запрос к VK API через HTTP
+    Возвращает словарь с ответом
     """
-    global vk_group
-    if vk_group is None or not conv_message_id:
-        return None
+    url = f"https://api.vk.com/method/{method}"
+    
+    # Добавляем обязательные параметры
+    params['v'] = VK_API_VERSION
+    params['access_token'] = GROUP_TOKEN
     
     try:
-        result = vk_group.messages.getByConversationMessageId(
-            peer_id=peer_id,
-            conversation_message_ids=[conv_message_id],
-            group_id=GROUP_ID
-        )
+        response = requests.post(url, data=params, timeout=10)
+        result = response.json()
         
-        items = result.get('items', [])
-        if items:
-            return items[0].get('id')
-        return None
+        if 'error' in result:
+            print(f"⚠️ Ошибка VK API: {result['error']}", flush=True)
+            return {'error': result['error']}
+        
+        return result.get('response', {})
     except Exception as e:
-        print(f"⚠️ Ошибка getByConversationMessageId: {e}", flush=True)
-        return None
+        print(f"⚠️ Ошибка запроса к VK API: {e}", flush=True)
+        return {'error': str(e)}
 
-def delete_message(peer_id: int, message_id: int) -> bool:
-    global vk_group
-    if vk_group is None or not message_id:
-        return False
+def send_message(peer_id: int, text: str) -> Optional[int]:
+    """
+    Отправка сообщения через прямой HTTP-запрос.
+    Возвращает conversation_message_id для удаления.
+    """
+    global pending_deletions
     
     try:
         rate_limit()
-        if peer_id >= 2000000000:
-            vk_group.messages.delete(
-                peer_id=peer_id,
-                cmids=[message_id],
-                delete_for_all=True
-            )
+        random_id = int(time.time() * 1000)
+        
+        # Экранируем текст для передачи в запросе
+        # Просто передаём как есть, requests сам позаботится об экранировании
+        
+        params = {
+            'peer_id': peer_id,
+            'message': text,
+            'random_id': random_id,
+            'group_id': GROUP_ID
+        }
+        
+        result = vk_api_request('messages.send', params)
+        
+        print(f"✅ Отправлено: {text[:50]}...", flush=True)
+        print(f"📦 Ответ API: {result}", flush=True)
+        
+        # Получаем conversation_message_id из ответа
+        conv_msg_id = None
+        
+        if isinstance(result, list) and len(result) > 0:
+            # Ответ может быть списком для нескольких peer_id
+            conv_msg_id = result[0].get('conversation_message_id')
+        elif isinstance(result, dict):
+            conv_msg_id = result.get('conversation_message_id')
+        elif isinstance(result, int):
+            # Для личных сообщений возвращается просто ID
+            if result != 0:
+                conv_msg_id = result
+        
+        if conv_msg_id:
+            print(f"📦 Получен conversation_message_id: {conv_msg_id}", flush=True)
+            
+            # Сохраняем для удаления
+            with deletions_lock:
+                pending_deletions.append({
+                    'peer_id': peer_id,
+                    'conv_message_id': conv_msg_id,
+                    'created_at': datetime.now()
+                })
+                save_bot_message(peer_id, conv_msg_id)
+            print(f"✅ Сообщение будет удалено через {DELETE_AFTER} секунд", flush=True)
+            return conv_msg_id
         else:
-            vk_group.messages.delete(
-                peer_id=peer_id,
-                message_ids=[message_id],
-                delete_for_all=True
-            )
-        print(f"🗑️ Удалено сообщение {message_id}", flush=True)
-        return True
-    except ApiError as e:
-        if e.code == 15:
-            print(f"⚠️ Нет прав на удаление {message_id}: {e}", flush=True)
-        else:
-            print(f"⚠️ Ошибка удаления {message_id}: {e}", flush=True)
-        return False
+            print(f"⚠️ Не удалось получить conversation_message_id", flush=True)
+            print(f"⚠️ Ответ: {result}", flush=True)
+            return None
+            
     except Exception as e:
-        print(f"⚠️ Ошибка удаления {message_id}: {e}", flush=True)
+        print(f"❌ Ошибка отправки: {e}")
+        return None
+
+def delete_message_by_conv_id(peer_id: int, conv_message_id: int) -> bool:
+    """
+    Удаление сообщения по conversation_message_id через прямой HTTP-запрос
+    """
+    try:
+        rate_limit()
+        
+        params = {
+            'peer_id': peer_id,
+            'cmids': conv_message_id,
+            'delete_for_all': 1,
+            'group_id': GROUP_ID
+        }
+        
+        result = vk_api_request('messages.delete', params)
+        
+        if result and isinstance(result, dict):
+            # Проверяем результат
+            if result.get('status') == 'ok' or result.get('deleted') == 1:
+                print(f"🗑️ Удалено сообщение {conv_message_id}", flush=True)
+                return True
+        
+        print(f"⚠️ Не удалось удалить сообщение {conv_message_id}", flush=True)
+        return False
+        
+    except Exception as e:
+        print(f"⚠️ Ошибка удаления: {e}", flush=True)
         return False
 
 def cleanup_worker():
+    """Фоновый воркер для удаления сообщений бота"""
     global pending_deletions
     print("🔄 Воркер удаления запущен", flush=True)
     
@@ -404,127 +465,12 @@ def cleanup_worker():
                 pending_deletions = remaining
             
             for item in to_delete:
-                print(f"🔍 Удаляю сообщение (conv_id: {item['conv_message_id']})...", flush=True)
-                
-                # Пробуем получить актуальный ID через getByConversationMessageId
-                msg_id = get_message_id_by_conv_id(item['peer_id'], item['conv_message_id'])
-                
-                if msg_id:
-                    if delete_message(item['peer_id'], msg_id):
-                        remove_bot_message(item['conv_message_id'])
-                else:
-                    # Если не получилось получить ID, пробуем удалить по сохранённому
-                    if item.get('message_id'):
-                        if delete_message(item['peer_id'], item['message_id']):
-                            remove_bot_message(item['conv_message_id'])
-                    else:
-                        print(f"⚠️ Не удалось удалить сообщение {item['conv_message_id']}", flush=True)
+                print(f"🔍 Удаляю сообщение {item['conv_message_id']}...", flush=True)
+                if delete_message_by_conv_id(item['peer_id'], item['conv_message_id']):
+                    remove_bot_message(item['conv_message_id'])
         except Exception as e:
             print(f"❌ Ошибка воркера: {e}", flush=True)
             time.sleep(5)
-
-def send_message(peer_id: int, text: str):
-    """
-    Отправка сообщения с получением ID через getByConversationMessageId
-    """
-    global vk_group, pending_deletions
-    if vk_group is None:
-        return None
-    
-    try:
-        rate_limit()
-        random_id = int(time.time() * 1000)
-        
-        # Отправляем сообщение
-        result = vk_group.messages.send(
-            peer_id=peer_id, 
-            message=text, 
-            random_id=random_id
-        )
-        
-        print(f"✅ Отправлено: {text[:50]}...", flush=True)
-        
-        # Для бесед нужно получить conversation_message_id
-        conv_msg_id = None
-        msg_id = None
-        
-        if peer_id >= 2000000000:
-            # Это беседа, нужно получить conversation_message_id
-            # Ждём немного, чтобы сообщение появилось
-            time.sleep(1.5)
-            
-            # Пробуем получить conversation_message_id через execute
-            # В execute используем getHistory только для поиска по random_id
-            code = f'''
-            var history = API.messages.getHistory({{
-                "peer_id": {peer_id},
-                "count": 50,
-                "rev": 0
-            }});
-            
-            var found = 0;
-            var i = 0;
-            while (i < history.items.length && found == 0) {{
-                if (history.items[i].random_id == {random_id}) {{
-                    found = history.items[i].conversation_message_id;
-                }}
-                i = i + 1;
-            }}
-            
-            return {{"conv_msg_id": found}};
-            '''
-            
-            try:
-                exec_result = vk_group.execute(code=code)
-                conv_msg_id = exec_result.get('conv_msg_id', 0) if isinstance(exec_result, dict) else 0
-                
-                if conv_msg_id:
-                    print(f"📦 Найден conversation_message_id: {conv_msg_id}", flush=True)
-                    
-                    # Получаем ID для удаления через getByConversationMessageId
-                    msg_id = get_message_id_by_conv_id(peer_id, conv_msg_id)
-                    
-                    if msg_id:
-                        print(f"📦 Найден ID для удаления: {msg_id}", flush=True)
-                    else:
-                        print(f"⚠️ Не удалось получить ID через getByConversationMessageId", flush=True)
-                else:
-                    print(f"⚠️ Не найден conversation_message_id", flush=True)
-                    
-            except Exception as e:
-                print(f"⚠️ Ошибка execute: {e}", flush=True)
-                
-        else:
-            # Личное сообщение - result может быть ID
-            if isinstance(result, int) and result != 0:
-                msg_id = result
-                print(f"📦 Получен ID из ответа: {msg_id}", flush=True)
-            elif isinstance(result, dict) and 'message_id' in result:
-                msg_id = result['message_id']
-                print(f"📦 Получен ID из ответа: {msg_id}", flush=True)
-        
-        # Сохраняем ID для удаления
-        if conv_msg_id or msg_id:
-            with deletions_lock:
-                pending_deletions.append({
-                    'peer_id': peer_id,
-                    'conv_message_id': conv_msg_id or 0,
-                    'message_id': msg_id or 0,
-                    'created_at': datetime.now()
-                })
-                if conv_msg_id:
-                    save_bot_message(peer_id, conv_msg_id, msg_id or 0)
-                else:
-                    save_bot_message(peer_id, 0, msg_id or 0)
-            print(f"✅ Сообщение будет удалено через {DELETE_AFTER} секунд", flush=True)
-        else:
-            print(f"⚠️ НЕ УДАЛОСЬ получить ID сообщения!", flush=True)
-            print(f"⚠️ Сообщение не будет удалено автоматически", flush=True)
-        
-        return random_id
-    except Exception as e:
-        print(f"❌ Ошибка отправки: {e}")
-        return None
 
 def schedule_greeting(peer_id: int):
     global greeting_timer
@@ -576,12 +522,12 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) 
     
     if not is_owner(user_id):
         if message_id:
-            delete_message(peer_id, message_id)
+            delete_message_by_conv_id(peer_id, message_id)
         send_message(peer_id, "❌ Только владелец чата может использовать VIP команды!")
         return True
     
     if message_id:
-        delete_message(peer_id, message_id)
+        delete_message_by_conv_id(peer_id, message_id)
     
     cleanup_expired_vip()
     
@@ -637,10 +583,16 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
     if user_id < 0:
         return
     
+    # Если сообщение от бота (группы) - игнорируем
+    if user_id < 0:
+        return
+    
+    # Проверяем команды VIP (только для владельца)
     if text.lower().startswith('!vip') or text.lower().startswith('!delvip') or text.lower() == '!inactive':
         handle_vip_commands(text, user_id, peer_id, message_id)
         return
     
+    # Если это владелец - публикуем ссылку без проверок
     if is_owner(user_id):
         vk_link = extract_vk_link(text)
         if vk_link:
@@ -654,27 +606,32 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         else:
             return
     
+    # === ДЛЯ ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ ===
     vk_link = extract_vk_link(text)
     
+    # Если ссылки нет - удаляем сообщение пользователя и отправляем предупреждение
     if not vk_link:
         if message_id:
-            delete_message(peer_id, message_id)
+            delete_message_by_conv_id(peer_id, message_id)
         send_message(peer_id, "🔗 Сообщение должно содержать только ссылку на контент!")
         return
     
+    # Проверяем, что сообщение содержит ТОЛЬКО ссылку
     if text != vk_link and not text.startswith('https://vk.com/') and not text.startswith('https://vk.ru/'):
         if message_id:
-            delete_message(peer_id, message_id)
+            delete_message_by_conv_id(peer_id, message_id)
         send_message(peer_id, "🔗 Сообщение должно содержать ТОЛЬКО ссылку на контент!")
         return
     
+    # Проверяем очередь
     if not can_user_post(user_id):
         need = max(0, 5 - get_posts_after_user(user_id))
         if message_id:
-            delete_message(peer_id, message_id)
+            delete_message_by_conv_id(peer_id, message_id)
         send_message(peer_id, f"⏳ Ждем Вас через {need} ссылок!")
         return
     
+    # Проверяем VIP ссылки
     cleanup_expired_vip()
     with vip_links_lock:
         if vip_links:
@@ -685,7 +642,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             
             if missing_vip:
                 if message_id:
-                    delete_message(peer_id, message_id)
+                    delete_message_by_conv_id(peer_id, message_id)
                 text = "⭐ Обязательно проставь лайки на VIP ссылки:\n\n"
                 for link in missing_vip:
                     text += f"⭐ {make_clickable_link(link)}\n"
@@ -696,6 +653,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                 send_message(peer_id, text)
                 return
     
+    # Проверяем обычные ссылки (последние 10)
     with queue_lock:
         regular_links = [item['link'] for item in queue[-10:] if not item.get('is_owner_post', 0)]
     
@@ -707,7 +665,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         
         if missing_regular:
             if message_id:
-                delete_message(peer_id, message_id)
+                delete_message_by_conv_id(peer_id, message_id)
             text = "📋 Обязательно проставь лайки на предыдущие 10 ссылок:\n\n"
             for link in missing_regular:
                 text += f"▫️ {make_clickable_link(link)}\n"
@@ -718,6 +676,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             send_message(peer_id, text)
             return
     
+    # Все проверки пройдены - публикуем ссылку
     with queue_lock:
         queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now(), 'is_owner_post': 0})
         if len(queue) > MAX_QUEUE_SIZE:
@@ -731,9 +690,11 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         }
     save_user_activity(user_id)
     
+    # Удаляем исходное сообщение пользователя
     if message_id:
-        delete_message(peer_id, message_id)
+        delete_message_by_conv_id(peer_id, message_id)
     
+    # Отправляем подтверждение
     text = f"✅ Ваша ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}\n📊 В очереди: {len(queue)}\n\n"
     text += "⏳ Ждем Вас через 5 ссылок!\n\n"
     text += "💎 Хочешь себе статус VIP? Обращайся к владельцу чата"
@@ -769,6 +730,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
             elif event_type == 'message_new':
                 msg = data.get('object', {}).get('message', {})
                 
+                # Проверяем, не новое ли это подключение участника
                 action = msg.get('action', {})
                 if action and action.get('type') in ['chat_invite_user', 'chat_invite_user_by_link']:
                     peer_id = msg.get('peer_id', 0)
