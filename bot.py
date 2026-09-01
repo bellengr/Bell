@@ -360,7 +360,6 @@ def send_message(peer_id: int, text: str) -> Optional[int]:
         rate_limit()
         random_id = int(time.time() * 1000)
         
-        # Используем peer_ids (с буквой "s") для получения conversation_message_id
         params = {
             'peer_ids': peer_id,
             'message': text,
@@ -375,53 +374,12 @@ def send_message(peer_id: int, text: str) -> Optional[int]:
         
         conv_msg_id = None
         
-        # При использовании peer_ids ответ приходит как список
         if isinstance(result, list) and len(result) > 0:
             conv_msg_id = result[0].get('conversation_message_id')
         elif isinstance(result, dict):
             conv_msg_id = result.get('conversation_message_id')
         elif isinstance(result, int) and result != 0:
             conv_msg_id = result
-        
-        # Если не получили через peer_ids, пробуем через execute
-        if not conv_msg_id:
-            print(f"⚠️ Не удалось получить через peer_ids, пробуем execute...", flush=True)
-            
-            # Экранируем текст
-            escaped_text = text.replace('"', '\\"').replace("'", "\\'")
-            
-            # Код для execute
-            code = f'''
-            var result = API.messages.send({{
-                "peer_id": {peer_id},
-                "message": "{escaped_text}",
-                "random_id": {random_id}
-            }});
-            
-            var conv_id = 0;
-            try {{
-                var history = API.messages.getHistory({{
-                    "peer_id": {peer_id},
-                    "count": 1,
-                    "rev": 0
-                }});
-                conv_id = history.items[0].conversation_message_id;
-            }} catch (e) {{
-                conv_id = 0;
-            }}
-            
-            return {{"message_id": result, "conv_message_id": conv_id}};
-            '''
-            
-            exec_result = vk_api_request('execute', {'code': code})
-            print(f"📦 Ответ execute: {exec_result}", flush=True)
-            
-            if isinstance(exec_result, dict):
-                conv_msg_id = exec_result.get('conv_message_id')
-                if not conv_msg_id:
-                    msg_id = exec_result.get('message_id')
-                    if msg_id and msg_id != 0:
-                        conv_msg_id = msg_id
         
         if conv_msg_id:
             print(f"📦 Получен conversation_message_id: {conv_msg_id}", flush=True)
@@ -459,12 +417,36 @@ def delete_message_by_conv_id(peer_id: int, conv_message_id: int) -> bool:
         
         result = vk_api_request('messages.delete', params)
         
-        if result and isinstance(result, dict):
-            if result.get('status') == 'ok' or result.get('deleted') == 1:
+        # VK API возвращает словарь вида { "peer_id_message_id": 1 } при успехе
+        if isinstance(result, dict):
+            # Проверяем ключ с нашим сообщением
+            key = f"{peer_id}_{conv_message_id}"
+            
+            if key in result:
+                if result[key] == 1:
+                    print(f"🗑️ Удалено сообщение {conv_message_id}", flush=True)
+                    return True
+            else:
+                # Проверяем другие возможные форматы
+                for k, v in result.items():
+                    if str(conv_message_id) in k or str(peer_id) in k:
+                        if v == 1:
+                            print(f"🗑️ Удалено сообщение {conv_message_id}", flush=True)
+                            return True
+                
+                # Если есть поле status
+                if result.get('status') == 'ok' or result.get('deleted') == 1:
+                    print(f"🗑️ Удалено сообщение {conv_message_id}", flush=True)
+                    return True
+        
+        # Если ответ - число
+        if isinstance(result, int):
+            if result == 1:
                 print(f"🗑️ Удалено сообщение {conv_message_id}", flush=True)
                 return True
         
         print(f"⚠️ Не удалось удалить сообщение {conv_message_id}", flush=True)
+        print(f"⚠️ Ответ: {result}", flush=True)
         return False
         
     except Exception as e:
