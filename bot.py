@@ -327,12 +327,15 @@ def get_posts_after_user(user_id: int) -> int:
         return len(queue) - user_posts[-1] - 1
 
 def cleanup_worker():
-    """Фоновый воркер для удаления сообщений через 5 минут"""
+    """Фоновый воркер для удаления сообщений"""
     global pending_deletions
-    print("🔄 Воркер удаления запущен")
+    print("🔄 Воркер удаления запущен", flush=True)
+    iteration = 0
+    
     while True:
         try:
-            time.sleep(30)
+            iteration += 1
+            print(f"🔍 Проверка #{iteration}: {len(pending_deletions)} сообщений в очереди", flush=True)
             
             now = datetime.now()
             to_delete = []
@@ -341,6 +344,7 @@ def cleanup_worker():
                 remaining = []
                 for item in pending_deletions:
                     elapsed = (now - item['created_at']).total_seconds()
+                    print(f"   {item['random_id']}: {elapsed:.0f} сек", flush=True)
                     if elapsed >= DELETE_AFTER:
                         to_delete.append(item)
                     else:
@@ -348,7 +352,7 @@ def cleanup_worker():
                 pending_deletions = remaining
             
             for item in to_delete:
-                print(f"🔍 Удаляю {item['random_id']}...")
+                print(f"🔍 Удаляю {item['random_id']}...", flush=True)
                 try:
                     rate_limit()
                     vk_group.messages.delete(
@@ -356,12 +360,14 @@ def cleanup_worker():
                         cmids=[item['random_id']],
                         delete_for_all=True
                     )
-                    print(f"🗑️ Удалено: {item['random_id']}")
+                    print(f"🗑️ Удалено: {item['random_id']}", flush=True)
                     remove_bot_message(item['random_id'])
                 except Exception as e:
-                    print(f"⚠️ Ошибка удаления {item['random_id']}: {e}")
+                    print(f"⚠️ Ошибка удаления {item['random_id']}: {e}", flush=True)
+            
+            time.sleep(30)
         except Exception as e:
-            print(f"❌ Ошибка воркера: {e}")
+            print(f"❌ Ошибка воркера: {e}", flush=True)
             time.sleep(5)
 
 def send_message(peer_id: int, text: str):
@@ -374,7 +380,7 @@ def send_message(peer_id: int, text: str):
         rate_limit()
         random_id = int(time.time() * 1000)
         result = vk_group.messages.send(peer_id=peer_id, message=text, random_id=random_id)
-        print(f"✅ Отправлено (random_id: {random_id}): {text[:50]}...")
+        print(f"✅ Отправлено (random_id: {random_id}): {text[:50]}...", flush=True)
         
         with deletions_lock:
             pending_deletions.append({
@@ -517,7 +523,7 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) 
 def process_message(peer_id: int, user_id: int, text: str, message_id: int, event_id: str = ""):
     global queue
     
-    print(f"\n📩 {user_id}: {text[:50]}")
+    print(f"\n📩 {user_id}: {text[:50]}", flush=True)
     sys.stdout.flush()
     
     if user_id < 0:
@@ -623,7 +629,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
     text += "⏳ Ждем Вас через 5 ссылок!\n\n"
     text += "💎 Хочешь себе статус VIP? Обращайся к администратору: @bellengr"
     send_message(peer_id, text)
-    print(f"   ✅ Опубликовано!")
+    print(f"   ✅ Опубликовано!", flush=True)
 
 class CallbackHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -658,7 +664,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 if action and action.get('type') in ['chat_invite_user', 'chat_invite_user_by_link']:
                     peer_id = msg.get('peer_id', 0)
                     schedule_greeting(peer_id)
-                    print(f"👋 Новый участник! Отправляю приветствие")
+                    print(f"👋 Новый участник! Отправляю приветствие", flush=True)
                     rb = b'ok'
                     self.send_response(200)
                     self.send_header('Content-Type', 'text/plain')
@@ -688,7 +694,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 obj = data.get('object', {})
                 peer_id = obj.get('peer_id', 0)
                 schedule_greeting(peer_id)
-                print(f"👋 Новый участник! Отправляю приветствие")
+                print(f"👋 Новый участник! Отправляю приветствие", flush=True)
                 
                 rb = b'ok'
                 self.send_response(200)
@@ -723,22 +729,22 @@ if __name__ == "__main__":
     
     vk_group_session = vk_api.VkApi(token=GROUP_TOKEN)
     vk_group = vk_group_session.get_api()
-    print("✅ Групповой API подключен")
+    print("✅ Групповой API подключен", flush=True)
     
     vk_user_session = vk_api.VkApi(token=USER_TOKEN)
     vk_user = vk_user_session.get_api()
-    print("✅ Пользовательский API подключен")
+    print("✅ Пользовательский API подключен", flush=True)
     
-    # Запускаем воркер удаления в ОТДЕЛЬНОМ НЕ-daemon потоке
+    # Запускаем воркер удаления
     cleanup_thread = threading.Thread(target=cleanup_worker)
-    cleanup_thread.daemon = False  # ВАЖНО: не daemon!
+    cleanup_thread.daemon = False
     cleanup_thread.start()
-    print("✅ Воркер удаления запущен в отдельном потоке")
+    print("✅ Воркер удаления запущен в отдельном потоке", flush=True)
     
-    print(f"📡 Порт: {PORT}")
+    print(f"📡 Порт: {PORT}", flush=True)
     sys.stdout.flush()
     
     server = HTTPServer(('0.0.0.0', PORT), CallbackHandler)
-    print(f"✅ Сервер запущен на 0.0.0.0:{PORT}")
+    print(f"✅ Сервер запущен на 0.0.0.0:{PORT}", flush=True)
     sys.stdout.flush()
     server.serve_forever()
