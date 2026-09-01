@@ -35,7 +35,7 @@ CONFIRMATION_CODE = os.getenv('CONFIRMATION_CODE', 'c756e565')
 PORT = int(os.getenv('PORT', '3000'))
 ADMIN_IDS_STR = os.getenv('ADMIN_IDS', '447457340')
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(',') if x.strip()]
-DELETE_AFTER = 300  # 5 минут (если не работает - поставьте 0)
+DELETE_AFTER = 300  # 5 минут
 # =============================================================================
 
 MAX_QUEUE_SIZE = 10
@@ -58,6 +58,13 @@ greeting_lock = threading.Lock()
 
 pending_deletions = []
 deletions_lock = threading.Lock()
+
+# Генератор уникальных меток для сообщений
+def generate_message_tag() -> str:
+    """Генерирует уникальную метку для сообщения"""
+    import random
+    import string
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=8))
 
 def make_clickable_link(vk_link: str) -> str:
     if not vk_link:
@@ -102,7 +109,7 @@ def init_database():
             CREATE TABLE IF NOT EXISTS bot_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 peer_id INTEGER NOT NULL,
-                message_id INTEGER NOT NULL,
+                message_tag TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
         ''')
@@ -139,11 +146,11 @@ def load_data():
                 'post_count': row[2]
             }
         
-        cursor.execute('SELECT peer_id, message_id, created_at FROM bot_messages')
+        cursor.execute('SELECT peer_id, message_tag, created_at FROM bot_messages')
         for row in cursor.fetchall():
             pending_deletions.append({
                 'peer_id': row[0],
-                'message_id': row[1],
+                'message_tag': row[1],
                 'created_at': datetime.fromisoformat(row[2])
             })
         
@@ -153,22 +160,22 @@ def load_data():
         print(f"⚠️ Ошибка загрузки: {e}")
     sys.stdout.flush()
 
-def save_bot_message(peer_id: int, message_id: int):
+def save_bot_message(peer_id: int, message_tag: str):
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute('INSERT INTO bot_messages (peer_id, message_id, created_at) VALUES (?, ?, ?)',
-                      (peer_id, message_id, datetime.now().isoformat()))
+        cursor.execute('INSERT INTO bot_messages (peer_id, message_tag, created_at) VALUES (?, ?, ?)',
+                      (peer_id, message_tag, datetime.now().isoformat()))
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"⚠️ Ошибка сохранения: {e}")
 
-def remove_bot_message(message_id: int):
+def remove_bot_message(message_tag: str):
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute('DELETE FROM bot_messages WHERE message_id = ?', (message_id,))
+        cursor.execute('DELETE FROM bot_messages WHERE message_tag = ?', (message_tag,))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -363,9 +370,37 @@ def delete_message(peer_id: int, message_id: int) -> bool:
         print(f"⚠️ Ошибка удаления {message_id}: {e}", flush=True)
         return False
 
+def delete_message_by_text(peer_id: int, search_text: str) -> bool:
+    """
+    Удаление сообщения по тексту через поиск в истории (если есть доступ)
+    """
+    global vk_group
+    if vk_group is None:
+        return False
+    
+    try:
+        rate_limit()
+        # Получаем историю сообщений
+        history = vk_group.messages.getHistory(
+            peer_id=peer_id,
+            count=50,
+            rev=0
+        )
+        
+        items = history.get('items', [])
+        for msg in items:
+            if search_text in msg.get('text', ''):
+                msg_id = msg.get('conversation_message_id', msg.get('id', 0))
+                if msg_id:
+                    return delete_message(peer_id, msg_id)
+        return False
+    except Exception as e:
+        print(f"⚠️ Ошибка поиска по тексту: {e}", flush=True)
+        return False
+
 def cleanup_worker():
-    """Фоновый воркер для удаления сообщений бота"""
-    global pending_deletions
+    """Фоновый воркер для удаления сообщений бота по тексту"""
+    global pending_deletions, vk_group
     print("🔄 Воркер удаления запущен", flush=True)
     
     while True:
@@ -386,115 +421,88 @@ def cleanup_worker():
                 pending_deletions = remaining
             
             for item in to_delete:
-                print(f"🔍 Удаляю сообщение {item['message_id']}...", flush=True)
-                if delete_message(item['peer_id'], item['message_id']):
-                    remove_bot_message(item['message_id'])
+                print(f"🔍 Удаляю сообщение с меткой {item['message_tag']}...", flush=True)
+                
+                # Пытаемся удалить по тексту
+                try:
+                    # Ищем в истории сообщения с нашей меткой
+                    history = vk_group.messages.getHistory(
+                        peer_id=item['peer_id'],
+                        count=50,
+                        rev=0
+                    )
+                    
+                    items = history.get('items', [])
+                    found = False
+                    
+                    for msg in items:
+                        if item['message_tag'] in msg.get('text', ''):
+                            msg_id = msg.get('conversation_message_id', msg.get('id', 0))
+                            if msg_id:
+                                if delete_message(item['peer_id'], msg_id):
+                                    found = True
+                                    remove_bot_message(item['message_tag'])
+                                    print(f"✅ Удалено сообщение с меткой {item['message_tag']}", flush=True)
+                                break
+                    
+                    if not found:
+                        print(f"⚠️ Сообщение с меткой {item['message_tag']} не найдено", flush=True)
+                        # Удаляем из БД, чтобы не пытаться снова
+                        remove_bot_message(item['message_tag'])
+                        
+                except ApiError as e:
+                    if e.code == 15:
+                        print(f"⚠️ Нет доступа к истории для удаления по тексту", flush=True)
+                        print(f"⚠️ Сообщение с меткой {item['message_tag']} не будет удалено автоматически", flush=True)
+                        # Удаляем из БД, чтобы не пытаться снова
+                        remove_bot_message(item['message_tag'])
+                    else:
+                        print(f"⚠️ Ошибка при удалении по тексту: {e}", flush=True)
+                except Exception as e:
+                    print(f"⚠️ Ошибка при удалении по тексту: {e}", flush=True)
+                    
         except Exception as e:
             print(f"❌ Ошибка воркера: {e}", flush=True)
             time.sleep(5)
 
 def send_message(peer_id: int, text: str):
     """
-    Отправка сообщения с сохранением ID для удаления.
-    Использует messages.getHistory для получения conversation_message_id.
+    Отправка сообщения с уникальной меткой для последующего удаления
     """
-    global vk_group, vk_user, pending_deletions
+    global vk_group, pending_deletions
     if vk_group is None:
         return None
     
     try:
         rate_limit()
+        
+        # Генерируем уникальную метку
+        tag = generate_message_tag()
+        
+        # Добавляем метку в сообщение (скрыто, в конце)
+        full_text = f"{text}\n\n🆔 {tag}"
+        
         random_id = int(time.time() * 1000)
         
         # Отправляем сообщение
         result = vk_group.messages.send(
             peer_id=peer_id, 
-            message=text, 
+            message=full_text, 
             random_id=random_id
         )
         
-        print(f"✅ Отправлено: {text[:50]}...", flush=True)
+        print(f"✅ Отправлено: {text[:50]}... (метка: {tag})", flush=True)
         
-        # Получаем ID сообщения
-        msg_id = None
+        # Сохраняем метку для удаления
+        with deletions_lock:
+            pending_deletions.append({
+                'peer_id': peer_id,
+                'message_tag': tag,
+                'created_at': datetime.now()
+            })
+            save_bot_message(peer_id, tag)
         
-        # Если ответ - число и не 0 (личное сообщение)
-        if isinstance(result, int) and result != 0:
-            msg_id = result
-            print(f"📦 Получен ID из ответа (int): {msg_id}", flush=True)
-        
-        # Если ответ - словарь с message_id
-        elif isinstance(result, dict) and 'message_id' in result:
-            msg_id = result['message_id']
-            print(f"📦 Получен ID из ответа (dict): {msg_id}", flush=True)
-        
-        # Если result == 0 (беседа) или не удалось получить ID
-        if not msg_id:
-            print(f"📦 Сообщение отправлено в беседу, ищем ID...", flush=True)
-            
-            # Ждем, чтобы сообщение появилось в истории
-            time.sleep(2)
-            
-            # Пробуем получить ID через историю (групповой токен)
-            try:
-                history = vk_group.messages.getHistory(
-                    peer_id=peer_id,
-                    count=10,
-                    rev=0
-                )
-                
-                items = history.get('items', [])
-                for msg in items:
-                    if msg.get('random_id') == random_id:
-                        msg_id = msg.get('conversation_message_id', msg.get('id', 0))
-                        if msg_id:
-                            print(f"📦 Найден conversation_message_id (групповой): {msg_id}", flush=True)
-                            break
-                
-                if not msg_id:
-                    print(f"⚠️ Не найдено в истории через групповой токен", flush=True)
-                    
-            except ApiError as e:
-                if e.code == 15:
-                    print(f"⚠️ Нет доступа к истории через групповой, пробуем USER_TOKEN", flush=True)
-                    
-                    # Пробуем через пользовательский токен
-                    if vk_user is not None:
-                        try:
-                            history = vk_user.messages.getHistory(
-                                peer_id=peer_id,
-                                count=10,
-                                rev=0
-                            )
-                            items = history.get('items', [])
-                            for msg in items:
-                                if msg.get('random_id') == random_id:
-                                    msg_id = msg.get('conversation_message_id', msg.get('id', 0))
-                                    if msg_id:
-                                        print(f"📦 Найден conversation_message_id (USER_TOKEN): {msg_id}", flush=True)
-                                        break
-                        except Exception as e2:
-                            print(f"⚠️ Ошибка через USER_TOKEN: {e2}", flush=True)
-                else:
-                    print(f"⚠️ Ошибка получения истории: {e}", flush=True)
-            except Exception as e:
-                print(f"⚠️ Ошибка получения ID: {e}", flush=True)
-        
-        # Сохраняем ID для удаления
-        if msg_id:
-            with deletions_lock:
-                pending_deletions.append({
-                    'peer_id': peer_id,
-                    'message_id': msg_id,
-                    'created_at': datetime.now()
-                })
-                save_bot_message(peer_id, msg_id)
-            print(f"✅ Сообщение будет удалено через {DELETE_AFTER} секунд", flush=True)
-        else:
-            print(f"⚠️ НЕ УДАЛОСЬ получить ID сообщения! Автоудаление не сработает.", flush=True)
-            if DELETE_AFTER > 0:
-                print(f"⚠️ Попробуйте получить токен с правами messages или установите DELETE_AFTER = 0", flush=True)
-        
+        print(f"✅ Сообщение будет удалено через {DELETE_AFTER} секунд", flush=True)
         return random_id
     except Exception as e:
         print(f"❌ Ошибка отправки: {e}")
@@ -846,7 +854,7 @@ if __name__ == "__main__":
     if DELETE_AFTER == 0:
         print("⚠️ ВНИМАНИЕ: Автоудаление сообщений бота ОТКЛЮЧЕНО (DELETE_AFTER = 0)", flush=True)
     else:
-        print(f"✅ Сообщения бота будут удаляться через {DELETE_AFTER} секунд", flush=True)
+        print(f"✅ Сообщения бота будут удаляться через {DELETE_AFTER} секунд (поиск по тексту)", flush=True)
     
     print(f"📡 Порт: {PORT}", flush=True)
     sys.stdout.flush()
