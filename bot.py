@@ -394,7 +394,7 @@ def cleanup_worker():
             time.sleep(5)
 
 def send_message(peer_id: int, text: str):
-    """Отправка сообщения с сохранением ID для удаления"""
+    """Отправка сообщения с сохранением ID для удаления через USER_TOKEN"""
     global vk_group, vk_user, pending_deletions
     if vk_group is None:
         return None
@@ -406,56 +406,34 @@ def send_message(peer_id: int, text: str):
         
         print(f"✅ Отправлено: {text[:50]}...", flush=True)
         
-        # Пытаемся получить ID сообщения через групповой токен
+        # Пытаемся получить ID через пользовательский токен
         time.sleep(1.5)
-        try:
-            history = vk_group.messages.getHistory(
-                peer_id=peer_id, 
-                count=10,
-                rev=0
-            )
-            items = history.get('items', [])
-            
-            for msg in items:
-                if msg.get('random_id') == random_id:
-                    msg_id = msg.get('conversation_message_id', msg.get('id', 0))
-                    if msg_id:
-                        print(f"📦 Найден ID через групповой токен: {msg_id}", flush=True)
-                        with deletions_lock:
-                            pending_deletions.append({
-                                'peer_id': peer_id,
-                                'message_id': msg_id,
-                                'created_at': datetime.now()
-                            })
-                            save_bot_message(peer_id, msg_id)
-                        break
-            else:
-                # Если через групповой не нашли, пробуем через пользовательский
-                if vk_user is not None:
-                    try:
-                        history = vk_user.messages.getHistory(
-                            peer_id=peer_id, 
-                            count=10,
-                            rev=0
-                        )
-                        items = history.get('items', [])
-                        for msg in items:
-                            if msg.get('random_id') == random_id:
-                                msg_id = msg.get('conversation_message_id', msg.get('id', 0))
-                                if msg_id:
-                                    print(f"📦 Найден ID через пользовательский токен: {msg_id}", flush=True)
-                                    with deletions_lock:
-                                        pending_deletions.append({
-                                            'peer_id': peer_id,
-                                            'message_id': msg_id,
-                                            'created_at': datetime.now()
-                                        })
-                                        save_bot_message(peer_id, msg_id)
-                                    break
-                    except Exception as e:
-                        print(f"⚠️ Ошибка получения ID через USER_TOKEN: {e}", flush=True)
-        except Exception as e:
-            print(f"⚠️ Не удалось получить ID сообщения: {e}", flush=True)
+        if vk_user is not None:
+            try:
+                history = vk_user.messages.getHistory(
+                    peer_id=peer_id, 
+                    count=10,
+                    rev=0
+                )
+                items = history.get('items', [])
+                
+                for msg in items:
+                    if msg.get('random_id') == random_id:
+                        msg_id = msg.get('conversation_message_id', msg.get('id', 0))
+                        if msg_id:
+                            print(f"📦 Найден ID через USER_TOKEN: {msg_id}", flush=True)
+                            with deletions_lock:
+                                pending_deletions.append({
+                                    'peer_id': peer_id,
+                                    'message_id': msg_id,
+                                    'created_at': datetime.now()
+                                })
+                                save_bot_message(peer_id, msg_id)
+                            break
+            except Exception as e:
+                print(f"⚠️ Не удалось получить ID через USER_TOKEN: {e}", flush=True)
+        else:
+            print(f"⚠️ USER_TOKEN недоступен", flush=True)
         
         return random_id
     except Exception as e:
@@ -799,22 +777,6 @@ if __name__ == "__main__":
     vk_user_session = vk_api.VkApi(token=USER_TOKEN)
     vk_user = vk_user_session.get_api()
     print("✅ Пользовательский API подключен", flush=True)
-    
-    # Проверяем права токена
-    try:
-        # Пытаемся получить историю (тестовый запрос)
-        test = vk_group.messages.getHistory(
-            peer_id=2000000001,
-            count=1
-        )
-        print("✅ Есть доступ к истории сообщений", flush=True)
-    except ApiError as e:
-        if e.code == 15:
-            print("❌ НЕТ доступа к истории сообщений (нужны права messages)", flush=True)
-        else:
-            print(f"⚠️ Ошибка доступа к истории: {e}", flush=True)
-    except Exception as e:
-        print(f"⚠️ Ошибка проверки: {e}", flush=True)
     
     cleanup_thread = threading.Thread(target=cleanup_worker)
     cleanup_thread.daemon = False
