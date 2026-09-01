@@ -101,7 +101,7 @@ def init_database():
             CREATE TABLE IF NOT EXISTS bot_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 peer_id INTEGER NOT NULL,
-                random_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL
             )
         ''')
@@ -138,11 +138,11 @@ def load_data():
                 'post_count': row[2]
             }
         
-        cursor.execute('SELECT peer_id, random_id, created_at FROM bot_messages')
+        cursor.execute('SELECT peer_id, message_id, created_at FROM bot_messages')
         for row in cursor.fetchall():
             pending_deletions.append({
                 'peer_id': row[0],
-                'random_id': row[1],
+                'message_id': row[1],
                 'created_at': datetime.fromisoformat(row[2])
             })
         
@@ -152,22 +152,22 @@ def load_data():
         print(f"⚠️ Ошибка загрузки: {e}")
     sys.stdout.flush()
 
-def save_bot_message(peer_id: int, random_id: int):
+def save_bot_message(peer_id: int, message_id: int):
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute('INSERT INTO bot_messages (peer_id, random_id, created_at) VALUES (?, ?, ?)',
-                      (peer_id, random_id, datetime.now().isoformat()))
+        cursor.execute('INSERT INTO bot_messages (peer_id, message_id, created_at) VALUES (?, ?, ?)',
+                      (peer_id, message_id, datetime.now().isoformat()))
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"⚠️ Ошибка сохранения: {e}")
 
-def remove_bot_message(random_id: int):
+def remove_bot_message(message_id: int):
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute('DELETE FROM bot_messages WHERE random_id = ?', (random_id,))
+        cursor.execute('DELETE FROM bot_messages WHERE message_id = ?', (message_id,))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -349,37 +349,24 @@ def cleanup_worker():
                 pending_deletions = remaining
             
             for item in to_delete:
-                print(f"🔍 Удаляю {item['random_id']}...", flush=True)
+                print(f"🔍 Удаляю {item['message_id']}...", flush=True)
                 try:
                     rate_limit()
-                    # Пробуем разные методы удаления
-                    try:
-                        vk_group.messages.delete(
-                            peer_id=item['peer_id'],
-                            conversation_message_ids=[item['random_id']],
-                            delete_for_all=True
-                        )
-                        print(f"🗑️ Удалено (conversation_message_ids): {item['random_id']}", flush=True)
-                        remove_bot_message(item['random_id'])
-                    except Exception as e1:
-                        try:
-                            vk_group.messages.delete(
-                                peer_id=item['peer_id'],
-                                message_ids=[item['random_id']],
-                                delete_for_all=True
-                            )
-                            print(f"🗑️ Удалено (message_ids): {item['random_id']}", flush=True)
-                            remove_bot_message(item['random_id'])
-                        except Exception as e2:
-                            print(f"⚠️ Ошибка удаления {item['random_id']}: {e2}", flush=True)
+                    vk_group.messages.delete(
+                        peer_id=item['peer_id'],
+                        cmids=[item['message_id']],
+                        delete_for_all=True
+                    )
+                    print(f"🗑️ Удалено: {item['message_id']}", flush=True)
+                    remove_bot_message(item['message_id'])
                 except Exception as e:
-                    print(f"⚠️ Ошибка: {e}", flush=True)
+                    print(f"⚠️ Ошибка удаления {item['message_id']}: {e}", flush=True)
         except Exception as e:
             print(f"❌ Ошибка воркера: {e}", flush=True)
             time.sleep(5)
 
 def send_message(peer_id: int, text: str):
-    """Отправка сообщения с сохранением для удаления"""
+    """Отправка сообщения с получением ID из истории"""
     global vk_group, pending_deletions
     if vk_group is None:
         return None
@@ -390,16 +377,33 @@ def send_message(peer_id: int, text: str):
         result = vk_group.messages.send(peer_id=peer_id, message=text, random_id=random_id)
         
         print(f"✅ Отправлено (random_id: {random_id}): {text[:50]}...", flush=True)
-        print(f"📦 Ответ VK: {result}", flush=True)
-        print(f"📦 Тип ответа: {type(result)}", flush=True)
         
-        with deletions_lock:
-            pending_deletions.append({
-                'peer_id': peer_id,
-                'random_id': random_id,
-                'created_at': datetime.now()
-            })
-            save_bot_message(peer_id, random_id)
+        # Получаем ID из истории
+        time.sleep(2)
+        rate_limit()
+        try:
+            history = vk_group.messages.getHistory(peer_id=peer_id, count=10)
+            items = history.get('items', [])
+            
+            real_message_id = None
+            for msg in items:
+                if msg.get('random_id') == random_id:
+                    real_message_id = msg.get('conversation_message_id', msg.get('id', 0))
+                    break
+            
+            if real_message_id:
+                print(f"📦 Найден ID в истории: {real_message_id}", flush=True)
+                with deletions_lock:
+                    pending_deletions.append({
+                        'peer_id': peer_id,
+                        'message_id': real_message_id,
+                        'created_at': datetime.now()
+                    })
+                    save_bot_message(peer_id, real_message_id)
+            else:
+                print(f"⚠️ ID не найден в истории", flush=True)
+        except Exception as e:
+            print(f"⚠️ Ошибка истории: {e}", flush=True)
         
         return random_id
     except Exception as e:
