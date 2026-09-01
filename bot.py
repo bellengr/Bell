@@ -101,6 +101,7 @@ def init_database():
             CREATE TABLE IF NOT EXISTS bot_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 peer_id INTEGER NOT NULL,
+                conv_message_id INTEGER NOT NULL,
                 message_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL
             )
@@ -138,12 +139,13 @@ def load_data():
                 'post_count': row[2]
             }
         
-        cursor.execute('SELECT peer_id, message_id, created_at FROM bot_messages')
+        cursor.execute('SELECT peer_id, conv_message_id, message_id, created_at FROM bot_messages')
         for row in cursor.fetchall():
             pending_deletions.append({
                 'peer_id': row[0],
-                'message_id': row[1],
-                'created_at': datetime.fromisoformat(row[2])
+                'conv_message_id': row[1],
+                'message_id': row[2],
+                'created_at': datetime.fromisoformat(row[3])
             })
         
         conn.close()
@@ -152,22 +154,22 @@ def load_data():
         print(f"⚠️ Ошибка загрузки: {e}")
     sys.stdout.flush()
 
-def save_bot_message(peer_id: int, message_id: int):
+def save_bot_message(peer_id: int, conv_message_id: int, message_id: int):
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute('INSERT INTO bot_messages (peer_id, message_id, created_at) VALUES (?, ?, ?)',
-                      (peer_id, message_id, datetime.now().isoformat()))
+        cursor.execute('INSERT INTO bot_messages (peer_id, conv_message_id, message_id, created_at) VALUES (?, ?, ?, ?)',
+                      (peer_id, conv_message_id, message_id, datetime.now().isoformat()))
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"⚠️ Ошибка сохранения: {e}")
 
-def remove_bot_message(message_id: int):
+def remove_bot_message(conv_message_id: int):
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute('DELETE FROM bot_messages WHERE message_id = ?', (message_id,))
+        cursor.execute('DELETE FROM bot_messages WHERE conv_message_id = ?', (conv_message_id,))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -326,6 +328,29 @@ def get_posts_after_user(user_id: int) -> int:
             return 0
         return len(queue) - user_posts[-1] - 1
 
+def get_message_id_by_conv_id(peer_id: int, conv_message_id: int) -> Optional[int]:
+    """
+    Получение ID сообщения для бота через getByConversationMessageId
+    """
+    global vk_group
+    if vk_group is None or not conv_message_id:
+        return None
+    
+    try:
+        result = vk_group.messages.getByConversationMessageId(
+            peer_id=peer_id,
+            conversation_message_ids=[conv_message_id],
+            group_id=GROUP_ID
+        )
+        
+        items = result.get('items', [])
+        if items:
+            return items[0].get('id')
+        return None
+    except Exception as e:
+        print(f"⚠️ Ошибка getByConversationMessageId: {e}", flush=True)
+        return None
+
 def delete_message(peer_id: int, message_id: int) -> bool:
     global vk_group
     if vk_group is None or not message_id:
@@ -379,51 +404,122 @@ def cleanup_worker():
                 pending_deletions = remaining
             
             for item in to_delete:
-                print(f"🔍 Удаляю сообщение {item['message_id']}...", flush=True)
-                if delete_message(item['peer_id'], item['message_id']):
-                    remove_bot_message(item['message_id'])
+                print(f"🔍 Удаляю сообщение (conv_id: {item['conv_message_id']})...", flush=True)
+                
+                # Пробуем получить актуальный ID через getByConversationMessageId
+                msg_id = get_message_id_by_conv_id(item['peer_id'], item['conv_message_id'])
+                
+                if msg_id:
+                    if delete_message(item['peer_id'], msg_id):
+                        remove_bot_message(item['conv_message_id'])
+                else:
+                    # Если не получилось получить ID, пробуем удалить по сохранённому
+                    if item.get('message_id'):
+                        if delete_message(item['peer_id'], item['message_id']):
+                            remove_bot_message(item['conv_message_id'])
+                    else:
+                        print(f"⚠️ Не удалось удалить сообщение {item['conv_message_id']}", flush=True)
         except Exception as e:
             print(f"❌ Ошибка воркера: {e}", flush=True)
             time.sleep(5)
 
 def send_message(peer_id: int, text: str):
-    global vk_group, vk_user, pending_deletions
+    """
+    Отправка сообщения с получением ID через getByConversationMessageId
+    """
+    global vk_group, pending_deletions
     if vk_group is None:
         return None
     
     try:
         rate_limit()
         random_id = int(time.time() * 1000)
-        vk_group.messages.send(peer_id=peer_id, message=text, random_id=random_id)
+        
+        # Отправляем сообщение
+        result = vk_group.messages.send(
+            peer_id=peer_id, 
+            message=text, 
+            random_id=random_id
+        )
         
         print(f"✅ Отправлено: {text[:50]}...", flush=True)
         
-        if vk_user is not None:
+        # Для бесед нужно получить conversation_message_id
+        conv_msg_id = None
+        msg_id = None
+        
+        if peer_id >= 2000000000:
+            # Это беседа, нужно получить conversation_message_id
+            # Ждём немного, чтобы сообщение появилось
             time.sleep(1.5)
+            
+            # Пробуем получить conversation_message_id через execute
+            # В execute используем getHistory только для поиска по random_id
+            code = f'''
+            var history = API.messages.getHistory({{
+                "peer_id": {peer_id},
+                "count": 50,
+                "rev": 0
+            }});
+            
+            var found = 0;
+            var i = 0;
+            while (i < history.items.length && found == 0) {{
+                if (history.items[i].random_id == {random_id}) {{
+                    found = history.items[i].conversation_message_id;
+                }}
+                i = i + 1;
+            }}
+            
+            return {{"conv_msg_id": found}};
+            '''
+            
             try:
-                history = vk_user.messages.getHistory(
-                    peer_id=peer_id, 
-                    count=10,
-                    rev=0
-                )
-                items = history.get('items', [])
+                exec_result = vk_group.execute(code=code)
+                conv_msg_id = exec_result.get('conv_msg_id', 0) if isinstance(exec_result, dict) else 0
                 
-                for msg in items:
-                    if msg.get('random_id') == random_id:
-                        msg_id = msg.get('conversation_message_id', msg.get('id', 0))
-                        if msg_id:
-                            print(f"📦 Найден conversation_message_id: {msg_id}", flush=True)
-                            with deletions_lock:
-                                pending_deletions.append({
-                                    'peer_id': peer_id,
-                                    'message_id': msg_id,
-                                    'created_at': datetime.now()
-                                })
-                                save_bot_message(peer_id, msg_id)
-                            print(f"✅ Сообщение будет удалено через {DELETE_AFTER} секунд", flush=True)
-                        break
+                if conv_msg_id:
+                    print(f"📦 Найден conversation_message_id: {conv_msg_id}", flush=True)
+                    
+                    # Получаем ID для удаления через getByConversationMessageId
+                    msg_id = get_message_id_by_conv_id(peer_id, conv_msg_id)
+                    
+                    if msg_id:
+                        print(f"📦 Найден ID для удаления: {msg_id}", flush=True)
+                    else:
+                        print(f"⚠️ Не удалось получить ID через getByConversationMessageId", flush=True)
+                else:
+                    print(f"⚠️ Не найден conversation_message_id", flush=True)
+                    
             except Exception as e:
-                print(f"⚠️ Ошибка получения ID через USER_TOKEN: {e}", flush=True)
+                print(f"⚠️ Ошибка execute: {e}", flush=True)
+                
+        else:
+            # Личное сообщение - result может быть ID
+            if isinstance(result, int) and result != 0:
+                msg_id = result
+                print(f"📦 Получен ID из ответа: {msg_id}", flush=True)
+            elif isinstance(result, dict) and 'message_id' in result:
+                msg_id = result['message_id']
+                print(f"📦 Получен ID из ответа: {msg_id}", flush=True)
+        
+        # Сохраняем ID для удаления
+        if conv_msg_id or msg_id:
+            with deletions_lock:
+                pending_deletions.append({
+                    'peer_id': peer_id,
+                    'conv_message_id': conv_msg_id or 0,
+                    'message_id': msg_id or 0,
+                    'created_at': datetime.now()
+                })
+                if conv_msg_id:
+                    save_bot_message(peer_id, conv_msg_id, msg_id or 0)
+                else:
+                    save_bot_message(peer_id, 0, msg_id or 0)
+            print(f"✅ Сообщение будет удалено через {DELETE_AFTER} секунд", flush=True)
+        else:
+            print(f"⚠️ НЕ УДАЛОСЬ получить ID сообщения!", flush=True)
+            print(f"⚠️ Сообщение не будет удалено автоматически", flush=True)
         
         return random_id
     except Exception as e:
