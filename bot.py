@@ -35,7 +35,7 @@ CONFIRMATION_CODE = os.getenv('CONFIRMATION_CODE', 'c756e565')
 PORT = int(os.getenv('PORT', '3000'))
 ADMIN_IDS_STR = os.getenv('ADMIN_IDS', '447457340')
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(',') if x.strip()]
-DELETE_AFTER = 300  # 5 минут
+DELETE_AFTER = 300
 # =============================================================================
 
 MAX_QUEUE_SIZE = 10
@@ -56,12 +56,11 @@ activity_lock = threading.Lock()
 greeting_timer = None
 greeting_lock = threading.Lock()
 
-# ====================== ОЧЕРЕДЬ НА УДАЛЕНИЕ ======================
-pending_deletions = []  # [{'message_id': ..., 'created_at': datetime}]
+# Очередь на удаление
+pending_deletions = []
 deletions_lock = threading.Lock()
 cleanup_timer = None
 cleanup_timer_lock = threading.Lock()
-# ================================================================
 
 def make_clickable_link(vk_link: str) -> str:
     if not vk_link:
@@ -105,7 +104,7 @@ def init_database():
             CREATE TABLE IF NOT EXISTS bot_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 peer_id INTEGER NOT NULL,
-                message_id INTEGER NOT NULL,
+                random_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL
             )
         ''')
@@ -142,37 +141,36 @@ def load_data():
                 'post_count': row[2]
             }
         
-        # Загружаем несохраненные сообщения бота
-        cursor.execute('SELECT peer_id, message_id, created_at FROM bot_messages')
+        cursor.execute('SELECT peer_id, random_id, created_at FROM bot_messages')
         for row in cursor.fetchall():
             pending_deletions.append({
                 'peer_id': row[0],
-                'message_id': row[1],
+                'random_id': row[1],
                 'created_at': datetime.fromisoformat(row[2])
             })
         
         conn.close()
-        print(f"📂 Загружено: {len(queue)} ссылок, {len(vip_links)} VIP, {len(pending_deletions)} сообщений на удаление")
+        print(f"📂 Загружено: {len(queue)} ссылок, {len(vip_links)} VIP, {len(pending_deletions)} на удаление")
     except Exception as e:
         print(f"⚠️ Ошибка загрузки: {e}")
     sys.stdout.flush()
 
-def save_bot_message(peer_id: int, message_id: int):
+def save_bot_message(peer_id: int, random_id: int):
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute('INSERT INTO bot_messages (peer_id, message_id, created_at) VALUES (?, ?, ?)',
-                      (peer_id, message_id, datetime.now().isoformat()))
+        cursor.execute('INSERT INTO bot_messages (peer_id, random_id, created_at) VALUES (?, ?, ?)',
+                      (peer_id, random_id, datetime.now().isoformat()))
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"⚠️ Ошибка сохранения сообщения: {e}")
+        print(f"⚠️ Ошибка сохранения: {e}")
 
-def remove_bot_message(message_id: int):
+def remove_bot_message(random_id: int):
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute('DELETE FROM bot_messages WHERE message_id = ?', (message_id,))
+        cursor.execute('DELETE FROM bot_messages WHERE random_id = ?', (random_id,))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -332,7 +330,7 @@ def get_posts_after_user(user_id: int) -> int:
         return len(queue) - user_posts[-1] - 1
 
 def send_message(peer_id: int, text: str):
-    """Отправка сообщения с сохранением ID для последующего удаления"""
+    """Отправка сообщения с сохранением random_id для удаления"""
     global vk_group, pending_deletions, cleanup_timer
     
     if vk_group is None:
@@ -343,36 +341,21 @@ def send_message(peer_id: int, text: str):
         random_id = int(time.time() * 1000)
         result = vk_group.messages.send(peer_id=peer_id, message=text, random_id=random_id)
         
-        # Получаем ID сообщения из результата
-        message_id = result if isinstance(result, int) and result > 0 else 0
+        print(f"✅ Отправлено (random_id: {random_id}): {text[:50]}...")
         
-        # Если ID = 0, ищем в истории
-        if not message_id:
-            time.sleep(1)
-            rate_limit()
-            history = vk_group.messages.getHistory(peer_id=peer_id, count=5)
-            items = history.get('items', [])
-            for msg in items:
-                if msg.get('random_id') == random_id:
-                    message_id = msg.get('conversation_message_id', msg.get('id', 0))
-                    break
+        # Сохраняем для удаления
+        with deletions_lock:
+            pending_deletions.append({
+                'peer_id': peer_id,
+                'random_id': random_id,
+                'created_at': datetime.now()
+            })
+            save_bot_message(peer_id, random_id)
         
-        print(f"✅ Отправлено (ID: {message_id}): {text[:50]}...")
+        # Запускаем таймер очистки
+        start_cleanup_timer()
         
-        # Сохраняем сообщение для удаления
-        if message_id:
-            with deletions_lock:
-                pending_deletions.append({
-                    'peer_id': peer_id,
-                    'message_id': message_id,
-                    'created_at': datetime.now()
-                })
-                save_bot_message(peer_id, message_id)
-            
-            # Запускаем общий таймер, если еще не запущен
-            start_cleanup_timer()
-        
-        return result
+        return random_id
     except Exception as e:
         print(f"❌ Ошибка отправки: {e}")
         return None
@@ -388,7 +371,7 @@ def start_cleanup_timer():
         
         def cleanup_loop():
             while True:
-                time.sleep(60)  # Проверяем каждую минуту
+                time.sleep(60)
                 
                 with deletions_lock:
                     now = datetime.now()
@@ -404,26 +387,18 @@ def start_cleanup_timer():
                     
                     pending_deletions = remaining
                 
-                # Удаляем просроченные
                 for item in to_delete:
                     try:
                         rate_limit()
-                        if item['peer_id'] >= 2000000000:
-                            vk_group.messages.delete(
-                                peer_id=item['peer_id'],
-                                cmids=[item['message_id']],
-                                delete_for_all=True
-                            )
-                        else:
-                            vk_group.messages.delete(
-                                peer_id=item['peer_id'],
-                                message_ids=[item['message_id']],
-                                delete_for_all=True
-                            )
-                        print(f"🗑️ Удалено (таймер): {item['message_id']}")
-                        remove_bot_message(item['message_id'])
+                        vk_group.messages.delete(
+                            peer_id=item['peer_id'],
+                            cmids=[item['random_id']],
+                            delete_for_all=True
+                        )
+                        print(f"🗑️ Удалено: {item['random_id']}")
+                        remove_bot_message(item['random_id'])
                     except Exception as e:
-                        print(f"⚠️ Ошибка удаления {item['message_id']}: {e}")
+                        print(f"⚠️ Ошибка удаления {item['random_id']}: {e}")
         
         cleanup_timer = threading.Thread(target=cleanup_loop, daemon=True)
         cleanup_timer.start()
