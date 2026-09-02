@@ -216,6 +216,25 @@ def save_vip_links():
     except Exception as e:
         print(f"⚠️ Ошибка сохранения VIP: {e}")
 
+def reload_vip_links():
+    """Перезагружает список VIP-ссылок из базы данных"""
+    global vip_links
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT link, added_by, expires_at FROM vip_links')
+        vip_rows = cursor.fetchall()
+        vip_links = []
+        now = datetime.now()
+        for row in vip_rows:
+            expires_at = datetime.fromisoformat(row[2])
+            if expires_at > now:
+                vip_links.append({'link': row[0], 'added_by': row[1], 'expires_at': expires_at})
+        conn.close()
+        print(f"🔄 VIP-ссылки перезагружены: {len(vip_links)}", flush=True)
+    except Exception as e:
+        print(f"⚠️ Ошибка перезагрузки VIP: {e}", flush=True)
+
 def cleanup_expired_vip():
     global vip_links
     with vip_links_lock:
@@ -534,6 +553,8 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) 
                         return True
                 vip_links.append({'link': vk_link, 'added_by': user_id, 'expires_at': datetime.now() + timedelta(hours=VIP_DURATION_HOURS)})
                 save_vip_links()
+                # Перезагружаем список из БД
+                reload_vip_links()
             send_message(peer_id, f"⭐ VIP-ссылка добавлена на 24 часа!\n🔗 {make_clickable_link(vk_link)}")
         return True
     
@@ -543,6 +564,8 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) 
             with vip_links_lock:
                 vip_links = [v for v in vip_links if v['link'] != parts[1]]
                 save_vip_links()
+                # Перезагружаем список из БД
+                reload_vip_links()
             send_message(peer_id, "✅ VIP-ссылка удалена!")
         return True
     
