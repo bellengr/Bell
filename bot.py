@@ -553,7 +553,6 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) 
                         return True
                 vip_links.append({'link': vk_link, 'added_by': user_id, 'expires_at': datetime.now() + timedelta(hours=VIP_DURATION_HOURS)})
                 save_vip_links()
-                # Перезагружаем список из БД
                 reload_vip_links()
             send_message(peer_id, f"⭐ VIP-ссылка добавлена на 24 часа!\n🔗 {make_clickable_link(vk_link)}")
         return True
@@ -564,7 +563,6 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) 
             with vip_links_lock:
                 vip_links = [v for v in vip_links if v['link'] != parts[1]]
                 save_vip_links()
-                # Перезагружаем список из БД
                 reload_vip_links()
             send_message(peer_id, "✅ VIP-ссылка удалена!")
         return True
@@ -613,7 +611,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                     'link': vk_link, 
                     'user_id': user_id, 
                     'timestamp': datetime.now(), 
-                    'is_owner_post': 0  # Ссылка в общей очереди
+                    'is_owner_post': 0
                 })
                 if len(queue) > MAX_QUEUE_SIZE:
                     queue.pop(0)
@@ -634,7 +632,27 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         return
     
     # Проверяем, что сообщение содержит ТОЛЬКО ссылку
-    if text != vk_link and not text.startswith('https://vk.com/') and not text.startswith('https://vk.ru/'):
+    # Очищаем текст от ссылки и проверяем, осталось ли что-то
+    cleaned_text = text
+    
+    # Удаляем все возможные вариации ссылок
+    # 1. Удаляем найденную ссылку (wall-123_456 и т.д.)
+    cleaned_text = cleaned_text.replace(vk_link, '')
+    
+    # 2. Удаляем ссылки с протоколами
+    cleaned_text = re.sub(r'https?://vk\.(com|ru)/[^\s]+', '', cleaned_text)
+    
+    # 3. Удаляем ссылки без протокола
+    cleaned_text = re.sub(r'vk\.(com|ru)/[^\s]+', '', cleaned_text)
+    
+    # 4. Удаляем домены в разных вариациях
+    cleaned_text = re.sub(r'vk\.(com|ru)', '', cleaned_text)
+    
+    # Удаляем пробелы в начале и конце
+    cleaned_text = cleaned_text.strip()
+    
+    # Если остался какой-то текст - это лишнее
+    if cleaned_text:
         if message_id:
             delete_message_by_conv_id(peer_id, message_id)
         send_message(peer_id, "🔗 Сообщение должно содержать ТОЛЬКО ссылку на контент!")
@@ -749,10 +767,8 @@ class CallbackHandler(BaseHTTPRequestHandler):
             elif event_type == 'message_new':
                 msg = data.get('object', {}).get('message', {})
                 
-                # Проверяем, не является ли сообщение системным (вступление участника)
                 action = msg.get('action', {})
                 if action and action.get('type') in ['chat_invite_user', 'chat_invite_user_by_link']:
-                    # Приветствие отключено
                     rb = b'ok'
                     self.send_response(200)
                     self.send_header('Content-Type', 'text/plain')
@@ -779,7 +795,6 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 self.wfile.write(rb)
             
             elif event_type in ['chat_invite_user', 'chat_invite_user_by_link']:
-                # Приветствие отключено
                 rb = b'ok'
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/plain')
