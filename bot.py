@@ -459,27 +459,19 @@ def delete_message_by_conv_id(peer_id: int, conv_message_id: int) -> bool:
         
         # VK API возвращает словарь вида { "peer_id_message_id": 1 } при успехе
         if isinstance(result, dict):
-            # Проверяем ключ с нашим сообщением
             key = f"{peer_id}_{conv_message_id}"
-            
-            if key in result:
-                if result[key] == 1:
-                    print(f"🗑️ Удалено сообщение {conv_message_id}", flush=True)
-                    return True
-            else:
-                # Проверяем другие возможные форматы
-                for k, v in result.items():
-                    if str(conv_message_id) in k or str(peer_id) in k:
-                        if v == 1:
-                            print(f"🗑️ Удалено сообщение {conv_message_id}", flush=True)
-                            return True
-                
-                # Если есть поле status
-                if result.get('status') == 'ok' or result.get('deleted') == 1:
-                    print(f"🗑️ Удалено сообщение {conv_message_id}", flush=True)
-                    return True
+            if key in result and result[key] == 1:
+                print(f"🗑️ Удалено сообщение {conv_message_id}", flush=True)
+                return True
+            for k, v in result.items():
+                if str(conv_message_id) in k or str(peer_id) in k:
+                    if v == 1:
+                        print(f"🗑️ Удалено сообщение {conv_message_id}", flush=True)
+                        return True
+            if result.get('status') == 'ok' or result.get('deleted') == 1:
+                print(f"🗑️ Удалено сообщение {conv_message_id}", flush=True)
+                return True
         
-        # Если ответ - число
         if isinstance(result, int):
             if result == 1:
                 print(f"🗑️ Удалено сообщение {conv_message_id}", flush=True)
@@ -555,6 +547,8 @@ def get_inactive_users(peer_id: int) -> str:
 def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) -> bool:
     global vip_links, queue
     
+    text_lower = text.lower().strip()
+    
     if not is_owner(user_id):
         if message_id:
             delete_message_by_conv_id(peer_id, message_id)
@@ -567,8 +561,13 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) 
     cleanup_expired_vip()
     
     # ===== КОМАНДА !vip =====
-    if text.lower().startswith('!vip '):
-        vk_link = extract_vk_link(text.split()[1])
+    if text_lower.startswith('!vip '):
+        try:
+            vk_link = extract_vk_link(text.split()[1])
+        except IndexError:
+            send_message(peer_id, "⚠️ Использование: !vip [ссылка]")
+            return True
+        
         if vk_link:
             with vip_links_lock:
                 for vip in vip_links:
@@ -579,58 +578,80 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) 
                 save_vip_links()
                 reload_vip_links()
             send_message(peer_id, f"⭐ VIP-ссылка добавлена на 24 часа!\n🔗 {make_clickable_link(vk_link)}")
+        else:
+            send_message(peer_id, "⚠️ Не удалось распознать ссылку!")
         return True
     
     # ===== КОМАНДА !delvip =====
-    if text.lower().startswith('!delvip'):
+    if text_lower.startswith('!delvip'):
         parts = text.split()
         if len(parts) >= 2:
-            with vip_links_lock:
-                vip_links = [v for v in vip_links if v['link'] != parts[1]]
-                save_vip_links()
-                reload_vip_links()
-            send_message(peer_id, "✅ VIP-ссылка удалена!")
+            link_to_delete = extract_vk_link(parts[1])
+            if link_to_delete:
+                with vip_links_lock:
+                    initial_count = len(vip_links)
+                    vip_links = [v for v in vip_links if v['link'] != link_to_delete]
+                    removed = initial_count - len(vip_links)
+                    save_vip_links()
+                    reload_vip_links()
+                if removed > 0:
+                    send_message(peer_id, f"✅ VIP-ссылка удалена!")
+                else:
+                    send_message(peer_id, f"⚠️ Ссылка не найдена в VIP!")
+            else:
+                send_message(peer_id, "⚠️ Не удалось распознать ссылку!")
+        else:
+            send_message(peer_id, "⚠️ Использование: !delvip [ссылка]")
         return True
     
     # ===== КОМАНДА !vip_list =====
-    if text.lower() == '!vip_list':
+    if text_lower == '!vip_list':
         with vip_links_lock:
             if not vip_links:
                 send_message(peer_id, "📭 VIP-ссылок нет")
                 return True
-            text = "⭐ VIP-ссылки:\n\n"
+            result = "⭐ VIP-ссылки:\n\n"
             now = datetime.now()
             for vip in vip_links:
                 remaining = vip['expires_at'] - now
                 hours = int(remaining.total_seconds() // 3600)
-                text += f"🔗 {make_clickable_link(vip['link'])}\n⏳ Осталось: {hours}ч\n\n"
-            send_message(peer_id, text)
+                result += f"🔗 {make_clickable_link(vip['link'])}\n⏳ Осталось: {hours}ч\n\n"
+            send_message(peer_id, result)
         return True
     
     # ===== КОМАНДА !inactive =====
-    if text.lower() == '!inactive':
+    if text_lower == '!inactive':
         inactive_text = get_inactive_users(peer_id)
         send_message(peer_id, inactive_text)
         return True
     
     # ===== КОМАНДА !delqueue =====
-    if text.lower().startswith('!delqueue'):
+    if text_lower.startswith('!delqueue'):
         parts = text.split()
         if len(parts) >= 2:
             link_to_delete = extract_vk_link(parts[1])
             if link_to_delete:
                 with queue_lock:
-                    # Ищем и удаляем ссылку из очереди
                     initial_count = len(queue)
-                    queue = [item for item in queue if item['link'] != link_to_delete]
-                    removed_count = initial_count - len(queue)
+                    new_queue = []
+                    for item in queue:
+                        item_link = item['link']
+                        if item_link.startswith('http'):
+                            extracted = extract_vk_link(item_link)
+                            if extracted:
+                                item_link = extracted
+                        if item_link != link_to_delete:
+                            new_queue.append(item)
+                    
+                    removed_count = initial_count - len(new_queue)
+                    queue = new_queue
                     save_queue()
                     reload_queue()
                 
                 if removed_count > 0:
                     send_message(peer_id, f"✅ Ссылка удалена из очереди ({removed_count} шт.)!\n🔗 {make_clickable_link(link_to_delete)}")
                 else:
-                    send_message(peer_id, f"⚠️ Ссылка не найдена в очереди!\n🔗 {make_clickable_link(link_to_delete)}")
+                    send_message(peer_id, f"⚠️ Ссылка не найдена в очереди!")
             else:
                 send_message(peer_id, "⚠️ Не удалось распознать ссылку!")
         else:
@@ -638,24 +659,25 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) 
         return True
     
     # ===== КОМАНДА !clearqueue =====
-    if text.lower() == '!clearqueue':
+    if text_lower == '!clearqueue':
         with queue_lock:
+            count = len(queue)
             queue = []
             save_queue()
             reload_queue()
-        send_message(peer_id, "✅ Очередь полностью очищена!")
+        send_message(peer_id, f"✅ Очередь полностью очищена! (удалено {count} ссылок)")
         return True
     
     # ===== КОМАНДА !queue_list =====
-    if text.lower() == '!queue_list':
+    if text_lower == '!queue_list':
         with queue_lock:
             if not queue:
                 send_message(peer_id, "📭 Очередь пустая")
                 return True
-            text = "📋 Очередь ссылок:\n\n"
+            result = "📋 Очередь ссылок:\n\n"
             for i, item in enumerate(queue, 1):
-                text += f"{i}. 🔗 {make_clickable_link(item['link'])}\n"
-            send_message(peer_id, text)
+                result += f"{i}. 🔗 {make_clickable_link(item['link'])}\n"
+            send_message(peer_id, result)
         return True
     
     return False
@@ -663,19 +685,19 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) 
 def process_message(peer_id: int, user_id: int, text: str, message_id: int, event_id: str = ""):
     global queue
     
-    print(f"\n📩 {user_id}: {text[:50]}", flush=True)
+    print(f"\n📩 {user_id}: {text[:80]}", flush=True)
     sys.stdout.flush()
     
     if user_id < 0:
         return
     
-    # Проверяем команды (только для владельца)
-    if (text.lower().startswith('!vip') or 
-        text.lower().startswith('!delvip') or 
-        text.lower() == '!inactive' or
-        text.lower().startswith('!delqueue') or
-        text.lower() == '!clearqueue' or
-        text.lower() == '!queue_list'):
+    text_lower = text.lower().strip()
+    
+    # Проверяем все команды владельца
+    command_prefixes = ['!vip', '!delvip', '!inactive', '!delqueue', '!clearqueue', '!queue_list']
+    is_command = any(text_lower.startswith(cmd) for cmd in command_prefixes)
+    
+    if is_command:
         handle_vip_commands(text, user_id, peer_id, message_id)
         return
     
@@ -705,21 +727,14 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
     if not vk_link:
         if message_id:
             delete_message_by_conv_id(peer_id, message_id)
-        send_message(peer_id, "🔗 Сообщение должно содержать только ссылку на контент!")
+        send_message(peer_id, "🔗 Сообщение должно содержать только ссылку на контент!\n\n💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330")
         return
     
     # Проверяем, что сообщение содержит ТОЛЬКО ссылку
-    cleaned_text = text
-    cleaned_text = cleaned_text.replace(vk_link, '')
-    cleaned_text = re.sub(r'https?://vk\.(com|ru)/[^\s]+', '', cleaned_text)
-    cleaned_text = re.sub(r'vk\.(com|ru)/[^\s]+', '', cleaned_text)
-    cleaned_text = re.sub(r'vk\.(com|ru)', '', cleaned_text)
-    cleaned_text = cleaned_text.strip()
-    
-    if cleaned_text:
+    if text != vk_link and not text.startswith('https://vk.com/') and not text.startswith('https://vk.ru/'):
         if message_id:
             delete_message_by_conv_id(peer_id, message_id)
-        send_message(peer_id, "🔗 Сообщение должно содержать ТОЛЬКО ссылку на контент!")
+        send_message(peer_id, "🔗 Сообщение должно содержать ТОЛЬКО ссылку на контент!\n\n💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330")
         return
     
     # Проверяем очередь
@@ -727,7 +742,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         need = max(0, 5 - get_posts_after_user(user_id))
         if message_id:
             delete_message_by_conv_id(peer_id, message_id)
-        send_message(peer_id, f"⏳ Ждем Вас через {need} ссылок!")
+        send_message(peer_id, f"⏳ Ждем Вас через {need} ссылок!\n\n💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330")
         return
     
     # ===== ПРОВЕРКА VIP ССЫЛОК (всегда проверяем) =====
@@ -749,7 +764,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                 text += f"\n{'─' * 30}\n"
                 text += "⏳ На выполнение даётся 5 минут!\n"
                 text += "✅ После того, как поставишь лайки, отправь свою ссылку снова.\n\n"
-                text += "💎 Хочешь себе статус VIP? Обращайся к владельцу чата"
+                text += "💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330"
                 send_message(peer_id, text)
                 return
     
@@ -772,20 +787,18 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             text += f"\n{'─' * 30}\n"
             text += "⏳ На выполнение даётся 5 минут!\n"
             text += "✅ После того, как поставишь лайки, отправь свою ссылку снова.\n\n"
-            text += "💎 Хочешь себе статус VIP? Обращайся к владельцу чата"
+            text += "💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330"
             send_message(peer_id, text)
             return
     
     # ========== ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ - ПУБЛИКУЕМ ССЫЛКУ ==========
     
-    # Добавляем ссылку в очередь
     with queue_lock:
         queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now(), 'is_owner_post': 0})
         if len(queue) > MAX_QUEUE_SIZE:
             queue.pop(0)
         save_queue()
     
-    # Сохраняем активность пользователя
     with activity_lock:
         user_activity[user_id] = {
             'last_post_time': datetime.now(),
@@ -793,12 +806,9 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         }
     save_user_activity(user_id)
     
-    # НЕ УДАЛЯЕМ сообщение пользователя со ссылкой - оно должно остаться в чате
-    
-    # Отправляем подтверждение
     text = f"✅ Ваша ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}\n📊 В очереди: {len(queue)}\n\n"
     text += "⏳ Ждем Вас через 5 ссылок!\n\n"
-    text += "💎 Хочешь себе статус VIP? Обращайся к владельцу чата"
+    text += "💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330"
     send_message(peer_id, text)
     print(f"   ✅ Опубликовано!", flush=True)
 
