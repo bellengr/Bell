@@ -53,6 +53,11 @@ vk_user = None
 user_activity = {}
 activity_lock = threading.Lock()
 
+# Кэш имён пользователей
+user_name_cache = {}  # {user_id: (name, timestamp)}
+user_name_cache_lock = threading.Lock()
+USER_NAME_CACHE_TTL = 3600  # 1 час
+
 pending_deletions = []
 deletions_lock = threading.Lock()
 
@@ -67,6 +72,42 @@ def make_clickable_link(vk_link: str) -> str:
 
 def is_owner(user_id: int) -> bool:
     return user_id in ADMIN_IDS
+
+def get_user_name(user_id: int) -> str:
+    """Получает имя пользователя с кэшированием"""
+    global vk_user
+    if vk_user is None:
+        return ""
+    
+    now = time.time()
+    
+    # Проверяем кэш
+    with user_name_cache_lock:
+        if user_id in user_name_cache:
+            name, ts = user_name_cache[user_id]
+            if now - ts < USER_NAME_CACHE_TTL:
+                return name
+    
+    # Запрашиваем у VK API
+    try:
+        rate_limit()
+        user_info = vk_user.users.get(user_ids=[user_id])[0]
+        name = f"{user_info['first_name']} {user_info['last_name']}"
+        
+        with user_name_cache_lock:
+            user_name_cache[user_id] = (name, now)
+        
+        return name
+    except Exception as e:
+        print(f"⚠️ Не удалось получить имя пользователя {user_id}: {e}", flush=True)
+        return ""
+
+def get_mention(user_id: int) -> str:
+    """Возвращает упоминание пользователя в формате ВК"""
+    name = get_user_name(user_id)
+    if name:
+        return f"[id{user_id}|{name}]"
+    return f"[id{user_id}|пользователь]"
 
 def init_database():
     try:
@@ -701,6 +742,9 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         handle_vip_commands(text, user_id, peer_id, message_id)
         return
     
+    # Получаем упоминание пользователя
+    mention = get_mention(user_id)
+    
     # === ПУБЛИКАЦИЯ ССЫЛКИ АДМИНИСТРАТОРА ===
     if is_owner(user_id):
         vk_link = extract_vk_link(text)
@@ -715,7 +759,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                 if len(queue) > MAX_QUEUE_SIZE:
                     queue.pop(0)
                 save_queue()
-            send_message(peer_id, f"✅ Ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}")
+            send_message(peer_id, f"{mention}, ✅ ваша ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}")
             return
         else:
             return
@@ -727,14 +771,14 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
     if not vk_link:
         if message_id:
             delete_message_by_conv_id(peer_id, message_id)
-        send_message(peer_id, "🔗 Сообщение должно содержать только ссылку на контент!\n\n💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330")
+        send_message(peer_id, f"{mention}, 🔗 сообщение должно содержать только ссылку на контент!\n\n💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330")
         return
     
     # Проверяем, что сообщение содержит ТОЛЬКО ссылку
     if text != vk_link and not text.startswith('https://vk.com/') and not text.startswith('https://vk.ru/'):
         if message_id:
             delete_message_by_conv_id(peer_id, message_id)
-        send_message(peer_id, "🔗 Сообщение должно содержать ТОЛЬКО ссылку на контент!\n\n💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330")
+        send_message(peer_id, f"{mention}, 🔗 сообщение должно содержать ТОЛЬКО ссылку на контент!\n\n💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330")
         return
     
     # Проверяем очередь
@@ -742,7 +786,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         need = max(0, 5 - get_posts_after_user(user_id))
         if message_id:
             delete_message_by_conv_id(peer_id, message_id)
-        send_message(peer_id, f"⏳ Ждем Вас через {need} ссылок!\n\n💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330")
+        send_message(peer_id, f"{mention}, ⏳ ждем Вас через {need} ссылок!\n\n💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330")
         return
     
     # ===== ПРОВЕРКА VIP ССЫЛОК (всегда проверяем) =====
@@ -758,7 +802,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             if missing_vip:
                 if message_id:
                     delete_message_by_conv_id(peer_id, message_id)
-                text = "⭐ Обязательно проставь лайки на VIP ссылки:\n\n"
+                text = f"{mention}, ⭐ обязательно проставь лайки на VIP ссылки:\n\n"
                 for link in missing_vip:
                     text += f"⭐ {make_clickable_link(link)}\n"
                 text += f"\n{'─' * 30}\n"
@@ -781,7 +825,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         if missing_regular:
             if message_id:
                 delete_message_by_conv_id(peer_id, message_id)
-            text = "📋 Обязательно проставь лайки на предыдущие 10 ссылок:\n\n"
+            text = f"{mention}, 📋 обязательно проставь лайки на предыдущие 10 ссылок:\n\n"
             for link in missing_regular:
                 text += f"▫️ {make_clickable_link(link)}\n"
             text += f"\n{'─' * 30}\n"
@@ -806,7 +850,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         }
     save_user_activity(user_id)
     
-    text = f"✅ Ваша ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}\n📊 В очереди: {len(queue)}\n\n"
+    text = f"{mention}, ✅ ваша ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}\n📊 В очереди: {len(queue)}\n\n"
     text += "⏳ Ждем Вас через 5 ссылок!\n\n"
     text += "💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330"
     send_message(peer_id, text)
