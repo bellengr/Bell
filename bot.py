@@ -23,9 +23,18 @@ try:
     print("✅ Библиотека vk-api загружена")
     sys.stdout.flush()
 except ImportError as e:
-    print(f"❌ Ошибка импорта: {e}")
+    print(f"❌ Ошибка импорта vk_api: {e}")
     sys.stdout.flush()
     raise
+
+try:
+    from vk_api.requests_pool import VkRequestsPool
+    print("✅ VkRequestsPool загружен")
+    sys.stdout.flush()
+except ImportError:
+    VkRequestsPool = None
+    print("⚠️ VkRequestsPool не найден, будет использоваться одиночная проверка")
+    sys.stdout.flush()
 
 # ====================== НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ======================
 GROUP_TOKEN = os.getenv('GROUP_TOKEN', '')
@@ -40,7 +49,7 @@ DELETE_AFTER = 300
 
 MAX_QUEUE_SIZE = 10
 VIP_DURATION_HOURS = 24
-RATE_LIMIT_DELAY = 0.34
+RATE_LIMIT_DELAY = 0.1
 DB_FILE = "bot_database.db"
 
 queue = []
@@ -49,12 +58,14 @@ vip_links = []
 vip_links_lock = threading.Lock()
 vk_group = None
 vk_user = None
+vk_user_session = None
 
 user_activity = {}
 activity_lock = threading.Lock()
 
-greeting_timer = None
-greeting_lock = threading.Lock()
+user_name_cache = {}
+user_name_cache_lock = threading.Lock()
+USER_NAME_CACHE_TTL = 3600
 
 pending_deletions = []
 deletions_lock = threading.Lock()
@@ -72,6 +83,37 @@ def make_clickable_link(vk_link: str) -> str:
 
 def is_owner(user_id: int) -> bool:
     return user_id in ADMIN_IDS
+
+
+def get_user_name(user_id: int) -> str:
+    global vk_user
+    if vk_user is None:
+        return ""
+    
+    now = time.time()
+    with user_name_cache_lock:
+        if user_id in user_name_cache:
+            name, ts = user_name_cache[user_id]
+            if now - ts < USER_NAME_CACHE_TTL:
+                return name
+    
+    try:
+        rate_limit()
+        user_info = vk_user.users.get(user_ids=[user_id])[0]
+        name = f"{user_info['first_name']} {user_info['last_name']}"
+        with user_name_cache_lock:
+            user_name_cache[user_id] = (name, now)
+        return name
+    except Exception as e:
+        print(f"⚠️ Не удалось получить имя пользователя {user_id}: {e}", flush=True)
+        return ""
+
+
+def get_mention(user_id: int) -> str:
+    name = get_user_name(user_id)
+    if name:
+        return f"[id{user_id}|{name}]"
+    return f"[id{user_id}|пользователь]"
 
 
 def init_database():
@@ -333,7 +375,7 @@ def get_content_type(vk_link: str):
     return '', 0, 0
 
 
-def check_user_like(user_id: int, vk_link: str) -> bool:
+def check_single_like(user_id: int, vk_link: str) -> bool:
     global vk_user
     if vk_user is None:
         return False
@@ -363,13 +405,76 @@ def check_user_like(user_id: int, vk_link: str) -> bool:
         if isinstance(response, dict):
             liked = response.get('liked', 0)
             copied = response.get('copied', 0)
-            result = liked == 1 or copied == 1
-            print(f"   📊 Лайк {'✅ ЕСТЬ' if result else '❌ НЕТ'}")
-            return result
+            return liked == 1 or copied == 1
         return response == 1
     except Exception as e:
-        print(f"   ❌ Ошибка: {e}")
+        print(f"   ❌ Ошибка проверки {vk_link}: {e}", flush=True)
         return False
+
+
+def check_likes_batch(user_id: int, links: list) -> dict:
+    global vk_user_session
+    if not links:
+        return {}
+    
+    results = {}
+    execute_links = []
+    single_links = []
+    
+    for link in links:
+        ctype, oid, iid = get_content_type(link)
+        if not ctype or oid == 0 or iid == 0:
+            results[link] = True
+            continue
+        
+        if ctype == 'video':
+            single_links.append((link, ctype, oid, iid))
+        else:
+            execute_links.append((link, ctype, oid, iid))
+    
+    if single_links:
+        print(f"   🎬 Одиночная проверка видео/клипов ({len(single_links)} шт.)", flush=True)
+        for link, ctype, oid, iid in single_links:
+            results[link] = check_single_like(user_id, link)
+    
+    if execute_links and vk_user_session is not None and VkRequestsPool is not None:
+        print(f"   📦 Пакетная проверка постов/фото ({len(execute_links)} шт.)", flush=True)
+        try:
+            with VkRequestsPool(vk_user_session) as pool:
+                requests_map = {}
+                for link, ctype, oid, iid in execute_links:
+                    req = pool.method('likes.isLiked', {
+                        'user_id': user_id,
+                        'type': ctype,
+                        'owner_id': oid,
+                        'item_id': iid
+                    })
+                    requests_map[req] = link
+            
+            for req, link in requests_map.items():
+                if req.ok:
+                    res = req.result
+                    if isinstance(res, dict):
+                        liked = res.get('liked', 0)
+                        copied = res.get('copied', 0)
+                        results[link] = (liked == 1 or copied == 1)
+                    else:
+                        results[link] = (res == 1)
+                else:
+                    print(f"   ⚠️ Ошибка проверки {link}: {req.error}", flush=True)
+                    results[link] = False
+                    
+        except Exception as e:
+            print(f"   ❌ Ошибка пакетной проверки: {e}", flush=True)
+            for link, ctype, oid, iid in execute_links:
+                if link not in results:
+                    results[link] = check_single_like(user_id, link)
+    elif execute_links:
+        print(f"   📦 Проверка постов/фото (одиночная, {len(execute_links)} шт.)", flush=True)
+        for link, ctype, oid, iid in execute_links:
+            results[link] = check_single_like(user_id, link)
+    
+    return results
 
 
 def can_user_post(user_id: int) -> bool:
@@ -419,7 +524,6 @@ def send_message(peer_id: int, text: str) -> Optional[int]:
         }
         result = vk_api_request('messages.send', params)
         print(f"✅ Отправлено: {text[:50]}...", flush=True)
-        print(f"📦 Ответ API: {result}", flush=True)
         conv_msg_id = None
         if isinstance(result, list) and len(result) > 0:
             conv_msg_id = result[0].get('conversation_message_id')
@@ -428,7 +532,6 @@ def send_message(peer_id: int, text: str) -> Optional[int]:
         elif isinstance(result, int) and result != 0:
             conv_msg_id = result
         if conv_msg_id:
-            print(f"📦 Получен conversation_message_id: {conv_msg_id}", flush=True)
             with deletions_lock:
                 pending_deletions.append({
                     'peer_id': peer_id,
@@ -459,7 +562,6 @@ def delete_message_by_conv_id(peer_id: int, conv_message_id: int) -> bool:
         if isinstance(result, dict) and 'error' in result:
             error_msg = str(result['error'])
             if 'message can not be found' in error_msg or 'message not found' in error_msg:
-                print(f"⚠️ Сообщение {conv_message_id} уже не существует, удаляем запись", flush=True)
                 remove_bot_message(conv_message_id)
                 return True
         if isinstance(result, dict):
@@ -676,6 +778,8 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         handle_vip_commands(text, user_id, peer_id, message_id)
         return
     
+    mention = get_mention(user_id)
+    
     if is_owner(user_id):
         vk_link = extract_vk_link(text)
         if vk_link:
@@ -684,7 +788,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
                 if len(queue) > MAX_QUEUE_SIZE:
                     queue.pop(0)
                 save_queue()
-            send_message(peer_id, f"✅ Ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}")
+            send_message(peer_id, f"{mention}, ✅ ваша ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}")
             return
         else:
             return
@@ -693,7 +797,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
     if not vk_link:
         if message_id:
             delete_message_by_conv_id(peer_id, message_id)
-        send_message(peer_id, "🔗 Сообщение должно содержать только ссылку на контент!")
+        send_message(peer_id, f"{mention}, 🔗 сообщение должно содержать только ссылку на контент!\n\n💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330")
         return
     
     text_without_link = text
@@ -704,51 +808,51 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
     if text_without_link:
         if message_id:
             delete_message_by_conv_id(peer_id, message_id)
-        send_message(peer_id, "🔗 Сообщение должно содержать ТОЛЬКО ссылку на контент!")
+        send_message(peer_id, f"{mention}, 🔗 сообщение должно содержать ТОЛЬКО ссылку на контент!\n\n💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330")
         return
     
     if not can_user_post(user_id):
         need = max(0, 5 - get_posts_after_user(user_id))
         if message_id:
             delete_message_by_conv_id(peer_id, message_id)
-        send_message(peer_id, f"⏳ Ждем Вас через {need} ссылок!")
+        send_message(peer_id, f"{mention}, ⏳ ждем Вас через {need} ссылок!\n\n💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330")
         return
     
     cleanup_expired_vip()
     
     with vip_links_lock:
-        if vip_links:
-            missing_vip = []
-            for vip in vip_links:
-                if not check_user_like(user_id, vip['link']):
-                    missing_vip.append(vip['link'])
-            
-            if missing_vip:
-                if message_id:
-                    delete_message_by_conv_id(peer_id, message_id)
-                text = "⭐ Обязательно проставь лайки на VIP ссылки:\n\n"
-                for link in missing_vip:
-                    text += f"⭐ {make_clickable_link(link)}\n"
-                text += f"\n{'─' * 30}\n"
-                text += "⏳ На выполнение даётся 5 минут!\n"
-                text += "✅ После того, как поставишь лайки, отправь свою ссылку снова.\n\n"
-                text += "💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330"
-                send_message(peer_id, text)
-                return
+        vip_links_list = [v['link'] for v in vip_links]
+    
+    if vip_links_list:
+        print(f"\n   ⭐ ПРОВЕРКА VIP-ССЫЛОК ({len(vip_links_list)} шт.):", flush=True)
+        vip_results = check_likes_batch(user_id, vip_links_list)
+        missing_vip = [link for link in vip_links_list if not vip_results.get(link, False)]
+        
+        if missing_vip:
+            if message_id:
+                delete_message_by_conv_id(peer_id, message_id)
+            text = f"{mention}, ⭐ обязательно проставь лайки на VIP ссылки:\n\n"
+            for link in missing_vip:
+                text += f"⭐ {make_clickable_link(link)}\n"
+            text += f"\n{'─' * 30}\n"
+            text += "⏳ На выполнение даётся 5 минут!\n"
+            text += "✅ После того, как поставишь лайки, отправь свою ссылку снова.\n\n"
+            text += "💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330"
+            send_message(peer_id, text)
+            return
     
     with queue_lock:
         regular_links = [item['link'] for item in queue[-10:]]
     
     if regular_links:
-        missing_regular = []
-        for link in regular_links:
-            if not check_user_like(user_id, link):
-                missing_regular.append(link)
+        print(f"\n   📋 ПРОВЕРКА ОБЫЧНЫХ ССЫЛОК ({len(regular_links)} шт.):", flush=True)
+        regular_results = check_likes_batch(user_id, regular_links)
+        missing_regular = [link for link in regular_links if not regular_results.get(link, False)]
         
         if missing_regular:
             if message_id:
                 delete_message_by_conv_id(peer_id, message_id)
-            text = "📋 Обязательно проставь лайки на предыдущие 10 ссылок:\n\n"
+            text = f"{mention}, 📋 обязательно проставь лайки на предыдущие 10 ссылок:\n\n"
             for link in missing_regular:
                 text += f"▫️ {make_clickable_link(link)}\n"
             text += f"\n{'─' * 30}\n"
@@ -771,7 +875,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         }
     save_user_activity(user_id)
     
-    text = f"✅ Ваша ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}\n📊 В очереди: {len(queue)}\n\n"
+    text = f"{mention}, ✅ ваша ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}\n📊 В очереди: {len(queue)}\n\n"
     text += "⏳ Ждем Вас через 5 ссылок!\n\n"
     text += "💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330"
     send_message(peer_id, text)
@@ -780,12 +884,15 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
 
 class CallbackHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        body = CONFIRMATION_CODE.encode() if self.path in ['/', '/callback'] else b'Bot is running'
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/plain')
-        self.send_header('Content-Length', str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            body = CONFIRMATION_CODE.encode() if self.path in ['/', '/callback'] else b'Bot is running'
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception as e:
+            print(f"❌ Ошибка do_GET: {e}", flush=True)
     
     def do_POST(self):
         length = int(self.headers.get('Content-Length', 0))
@@ -793,21 +900,27 @@ class CallbackHandler(BaseHTTPRequestHandler):
         try:
             data = json.loads(body)
             event_type = data.get('type', '')
-            print(f"📥 Событие: {event_type}", flush=True)
+            
+            # ===== CONFIRMATION — чистый ответ =====
             if event_type == 'confirmation':
-                rb = CONFIRMATION_CODE.encode()
+                rb = CONFIRMATION_CODE.strip().encode('utf-8')
                 self.send_response(200)
-                self.send_header('Content-Type', 'text/plain')
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
                 self.send_header('Content-Length', str(len(rb)))
                 self.end_headers()
                 self.wfile.write(rb)
-            elif event_type == 'message_new':
+                return
+            
+            # ===== ОСТАЛЬНЫЕ СОБЫТИЯ =====
+            print(f"📥 Событие: {event_type}", flush=True)
+            
+            if event_type == 'message_new':
                 msg = data.get('object', {}).get('message', {})
                 action = msg.get('action', {})
                 if action and action.get('type') in ['chat_invite_user', 'chat_invite_user_by_link']:
                     rb = b'ok'
                     self.send_response(200)
-                    self.send_header('Content-Type', 'text/plain')
+                    self.send_header('Content-Type', 'text/plain; charset=utf-8')
                     self.send_header('Content-Length', str(len(rb)))
                     self.end_headers()
                     self.wfile.write(rb)
@@ -823,25 +936,28 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 thread.start()
                 rb = b'ok'
                 self.send_response(200)
-                self.send_header('Content-Type', 'text/plain')
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
                 self.send_header('Content-Length', str(len(rb)))
                 self.end_headers()
                 self.wfile.write(rb)
             else:
                 rb = b'ok'
                 self.send_response(200)
-                self.send_header('Content-Type', 'text/plain')
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
                 self.send_header('Content-Length', str(len(rb)))
                 self.end_headers()
                 self.wfile.write(rb)
         except Exception as e:
-            print(f"❌ Ошибка: {e}", flush=True)
-            rb = b'ok'
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/plain')
-            self.send_header('Content-Length', str(len(rb)))
-            self.end_headers()
-            self.wfile.write(rb)
+            print(f"❌ Ошибка do_POST: {e}", flush=True)
+            try:
+                rb = b'ok'
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Length', str(len(rb)))
+                self.end_headers()
+                self.wfile.write(rb)
+            except:
+                pass
     
     def log_message(self, fmt, *args):
         pass
@@ -868,7 +984,9 @@ if __name__ == "__main__":
     print(f"📡 Порт: {PORT}", flush=True)
     sys.stdout.flush()
     
+    # Запускаем сервер БЕЗ регистрации Callback API
     server = HTTPServer(('0.0.0.0', PORT), CallbackHandler)
     print(f"✅ Сервер запущен на 0.0.0.0:{PORT}", flush=True)
+    print("ℹ️ Callback API сервер НЕ создаётся автоматически. Создайте его вручную в настройках группы.", flush=True)
     sys.stdout.flush()
     server.serve_forever()
