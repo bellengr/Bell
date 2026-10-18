@@ -908,7 +908,6 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-Length', str(len(rb)))
                 self.end_headers()
                 self.wfile.write(rb)
-                return
             
             print(f"📥 Событие: {event_type}", flush=True)
             
