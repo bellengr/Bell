@@ -40,7 +40,7 @@ except ImportError:
 GROUP_TOKEN = os.getenv('GROUP_TOKEN', '')
 USER_TOKEN = os.getenv('USER_TOKEN', '')
 GROUP_ID = int(os.getenv('GROUP_ID', '241064421'))
-CONFIRMATION_CODE = os.getenv('CONFIRMATION_CODE', '8e807a46')
+CONFIRMATION_CODE = os.getenv('CONFIRMATION_CODE', 'bc8b14a3')
 PORT = int(os.getenv('PORT', '3000'))
 ADMIN_IDS_STR = os.getenv('ADMIN_IDS', '447457340')
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(',') if x.strip()]
@@ -887,7 +887,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
         try:
             body = CONFIRMATION_CODE.encode() if self.path in ['/', '/callback'] else b'Bot is running'
             self.send_response(200)
-            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Type', 'text/plain')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -901,17 +901,15 @@ class CallbackHandler(BaseHTTPRequestHandler):
             data = json.loads(body)
             event_type = data.get('type', '')
             
-            # ===== CONFIRMATION — чистый ответ =====
             if event_type == 'confirmation':
-                rb = CONFIRMATION_CODE.strip().encode('utf-8')
+                rb = CONFIRMATION_CODE.encode()
                 self.send_response(200)
-                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Type', 'text/plain')
                 self.send_header('Content-Length', str(len(rb)))
                 self.end_headers()
                 self.wfile.write(rb)
                 return
             
-            # ===== ОСТАЛЬНЫЕ СОБЫТИЯ =====
             print(f"📥 Событие: {event_type}", flush=True)
             
             if event_type == 'message_new':
@@ -920,7 +918,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 if action and action.get('type') in ['chat_invite_user', 'chat_invite_user_by_link']:
                     rb = b'ok'
                     self.send_response(200)
-                    self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                    self.send_header('Content-Type', 'text/plain')
                     self.send_header('Content-Length', str(len(rb)))
                     self.end_headers()
                     self.wfile.write(rb)
@@ -936,14 +934,14 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 thread.start()
                 rb = b'ok'
                 self.send_response(200)
-                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Type', 'text/plain')
                 self.send_header('Content-Length', str(len(rb)))
                 self.end_headers()
                 self.wfile.write(rb)
             else:
                 rb = b'ok'
                 self.send_response(200)
-                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Type', 'text/plain')
                 self.send_header('Content-Length', str(len(rb)))
                 self.end_headers()
                 self.wfile.write(rb)
@@ -952,7 +950,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
             try:
                 rb = b'ok'
                 self.send_response(200)
-                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Type', 'text/plain')
                 self.send_header('Content-Length', str(len(rb)))
                 self.end_headers()
                 self.wfile.write(rb)
@@ -984,9 +982,7 @@ if __name__ == "__main__":
     print(f"📡 Порт: {PORT}", flush=True)
     sys.stdout.flush()
     
-    # Запускаем сервер БЕЗ регистрации Callback API
     server = HTTPServer(('0.0.0.0', PORT), CallbackHandler)
     print(f"✅ Сервер запущен на 0.0.0.0:{PORT}", flush=True)
-    print("ℹ️ Callback API сервер НЕ создаётся автоматически. Создайте его вручную в настройках группы.", flush=True)
     sys.stdout.flush()
     server.serve_forever()
