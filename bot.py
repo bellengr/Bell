@@ -36,6 +36,11 @@ PORT = int(os.getenv('PORT', '3000'))
 ADMIN_IDS_STR = os.getenv('ADMIN_IDS', '447457340')
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(',') if x.strip()]
 DELETE_AFTER = 300
+
+# Для добавления сервера через API (если нужно)
+CALLBACK_SETUP_TOKEN = os.getenv('CALLBACK_SETUP_TOKEN', GROUP_TOKEN) # Используем GROUP_TOKEN по умолчанию
+CALLBACK_SERVER_URL = os.getenv('CALLBACK_SERVER_URL', 'https://bot-1788197810-6223-bellengr.bothost.tech/')
+CALLBACK_SERVER_TITLE = os.getenv('CALLBACK_SERVER_TITLE', 'bell_like_bot')
 # =============================================================================
 
 MAX_QUEUE_SIZE = 10
@@ -72,6 +77,52 @@ def make_clickable_link(vk_link: str) -> str:
 
 def is_owner(user_id: int) -> bool:
     return user_id in ADMIN_IDS
+
+
+def setup_callback_server():
+    """
+    Программно добавляет сервер Callback API и выводит код подтверждения.
+    Это может помочь, если веб-интерфейс ВК показывает один код, а ожидает другой.
+    """
+    global CALLBACK_SETUP_TOKEN, GROUP_ID, CALLBACK_SERVER_URL, CALLBACK_SERVER_TITLE
+    
+    if not CALLBACK_SETUP_TOKEN:
+        print("⚠️ CALLBACK_SETUP_TOKEN не задан, пропускаем добавление сервера", flush=True)
+        return
+    
+    print("\n" + "=" * 60, flush=True)
+    print("🛠️ ПОПЫТКА ПРОГРАММНОГО ДОБАВЛЕНИЯ СЕРВЕРА CALLBACK API", flush=True)
+    print("=" * 60, flush=True)
+    
+    url = 'https://api.vk.com/method/groups.addCallbackServer'
+    params = {
+        'group_id': GROUP_ID,
+        'url': CALLBACK_SERVER_URL,
+        'title': CALLBACK_SERVER_TITLE,
+        'access_token': CALLBACK_SETUP_TOKEN,
+        'v': VK_API_VERSION
+    }
+    
+    try:
+        response = requests.post(url, data=params, timeout=10).json()
+        
+        if 'response' in response:
+            confirmation_code = response['response'].get('confirmation_code')
+            server_id = response['response'].get('server_id')
+            print(f"✅ Сервер успешно добавлен! ID: {server_id}", flush=True)
+            print(f"🔑 НОВЫЙ КОД ПОДТВЕРЖДЕНИЯ: {confirmation_code}", flush=True)
+            print("📌 ВАЖНО: Вставьте этот код в переменную CONFIRMATION_CODE на BotHost и пересоберите контейнер!", flush=True)
+        elif 'error' in response:
+            error = response['error']
+            print(f"❌ Ошибка при добавлении сервера: {error.get('error_msg')} (код: {error.get('error_code')})", flush=True)
+            if error.get('error_code') == 1:
+                print("💡 Возможно, сервер с таким URL уже существует. Удалите его через groups.deleteCallbackServer или используйте другой URL.", flush=True)
+        else:
+            print(f"⚠️ Неизвестный ответ от VK API: {response}", flush=True)
+            
+    except Exception as e:
+        print(f"❌ Исключение при добавлении сервера: {e}", flush=True)
+    print("=" * 60 + "\n", flush=True)
 
 
 def init_database():
@@ -345,16 +396,14 @@ def check_user_like(user_id: int, vk_link: str) -> bool:
     try:
         rate_limit()
         
-        # === ДЛЯ ВИДЕО И КЛИПОВ: owner_id передаём как строку ===
         if content_type == 'video':
             response = vk_user.likes.isLiked(
                 user_id=user_id,
                 type=content_type,
-                owner_id=str(owner_id),  # ← строка с минусом внутри
+                owner_id=str(owner_id),
                 item_id=item_id
             )
         else:
-            # Для постов, фото и т.д. — как было
             response = vk_user.likes.isLiked(
                 user_id=user_id,
                 type=content_type,
@@ -850,6 +899,9 @@ class CallbackHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    # Пытаемся добавить сервер через API (если заданы соответствующие переменные)
+    setup_callback_server()
+    
     init_database()
     load_data()
     cleanup_old_queue()
