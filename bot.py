@@ -368,7 +368,6 @@ def get_content_type(vk_link: str):
 
 
 def check_single_like(user_id: int, vk_link: str) -> bool:
-    """Одиночная проверка лайка (для видео/клипов)"""
     global vk_user
     if vk_user is None:
         return False
@@ -406,21 +405,14 @@ def check_single_like(user_id: int, vk_link: str) -> bool:
 
 
 def check_likes_batch(user_id: int, links: list) -> dict:
-    """
-    Пакетная проверка лайков.
-    - Видео и клипы: по одной через vk_user.likes.isLiked (старый метод)
-    - Посты и фото: пакетно через execute
-    Возвращает: {link: True/False/None}
-    """
     global vk_user_session
     if not links:
         return {}
     
     results = {}
-    execute_links = []  # для пакетной проверки
-    single_links = []   # для одиночной проверки (видео/клипы)
+    execute_links = []
+    single_links = []
     
-    # Разделяем ссылки
     for link in links:
         ctype, oid, iid = get_content_type(link)
         if not ctype or oid == 0 or iid == 0:
@@ -432,13 +424,11 @@ def check_likes_batch(user_id: int, links: list) -> dict:
         else:
             execute_links.append((link, ctype, oid, iid))
     
-    # ===== 1. ОДИНОЧНАЯ ПРОВЕРКА ВИДЕО/КЛИПОВ =====
     if single_links:
         print(f"   🎬 Одиночная проверка видео/клипов ({len(single_links)} шт.)", flush=True)
         for link, ctype, oid, iid in single_links:
             results[link] = check_single_like(user_id, link)
     
-    # ===== 2. ПАКЕТНАЯ ПРОВЕРКА ПОСТОВ/ФОТО =====
     if execute_links and vk_user_session is not None:
         print(f"   📦 Пакетная проверка постов/фото ({len(execute_links)} шт.)", flush=True)
         try:
@@ -818,7 +808,6 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
     
     cleanup_expired_vip()
     
-    # ===== ПРОВЕРКА VIP =====
     with vip_links_lock:
         vip_links_list = [v['link'] for v in vip_links]
     
@@ -840,7 +829,6 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             send_message(peer_id, text)
             return
     
-    # ===== ПРОВЕРКА ОБЫЧНЫХ ССЫЛОК =====
     with queue_lock:
         regular_links = [item['link'] for item in queue[-10:]]
     
@@ -862,7 +850,6 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             send_message(peer_id, text)
             return
     
-    # ========== ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ ==========
     with queue_lock:
         queue.append({'link': vk_link, 'user_id': user_id, 'timestamp': datetime.now(), 'is_owner_post': 0})
         if len(queue) > MAX_QUEUE_SIZE:
@@ -898,7 +885,8 @@ class CallbackHandler(BaseHTTPRequestHandler):
         try:
             data = json.loads(body)
             event_type = data.get('type', '')
-            print(f"📥 Событие: {event_type}", flush=True)
+            
+            # ===== CONFIRMATION — БЕЗ PRINT, чистый ответ =====
             if event_type == 'confirmation':
                 rb = CONFIRMATION_CODE.encode()
                 self.send_response(200)
@@ -906,7 +894,12 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-Length', str(len(rb)))
                 self.end_headers()
                 self.wfile.write(rb)
-            elif event_type == 'message_new':
+                return
+            
+            # ===== ОСТАЛЬНЫЕ СОБЫТИЯ =====
+            print(f"📥 Событие: {event_type}", flush=True)
+            
+            if event_type == 'message_new':
                 msg = data.get('object', {}).get('message', {})
                 action = msg.get('action', {})
                 if action and action.get('type') in ['chat_invite_user', 'chat_invite_user_by_link']:
