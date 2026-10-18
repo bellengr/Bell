@@ -31,7 +31,7 @@ except ImportError as e:
 GROUP_TOKEN = os.getenv('GROUP_TOKEN', '')
 USER_TOKEN = os.getenv('USER_TOKEN', '')
 GROUP_ID = int(os.getenv('GROUP_ID', '241064421'))
-CONFIRMATION_CODE = os.getenv('CONFIRMATION_CODE', 'bc8b14a3')
+CONFIRMATION_CODE = os.getenv('CONFIRMATION_CODE', '8e807a46')
 PORT = int(os.getenv('PORT', '3000'))
 ADMIN_IDS_STR = os.getenv('ADMIN_IDS', '447457340')
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(',') if x.strip()]
