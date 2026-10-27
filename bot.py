@@ -40,7 +40,7 @@ except ImportError:
 GROUP_TOKEN = os.getenv('GROUP_TOKEN', '')
 USER_TOKEN = os.getenv('USER_TOKEN', '')
 GROUP_ID = int(os.getenv('GROUP_ID', '242396312'))
-CONFIRMATION_CODE = os.getenv('CONFIRMATION_CODE', 'e61dc94a')
+CONFIRMATION_CODE = os.getenv('CONFIRMATION_CODE', '')
 PORT = int(os.getenv('PORT', '3000'))
 ADMIN_IDS_STR = os.getenv('ADMIN_IDS', '447457340')
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(',') if x.strip()]
@@ -48,7 +48,12 @@ DELETE_AFTER = 300
 # =============================================================================
 
 MAX_QUEUE_SIZE = 10
-VIP_DURATION_HOURS = 24
+VIP_DURATIONS = {
+    '24': 24,
+    '48': 48,
+    '72': 72,
+}
+DEFAULT_VIP_DURATION = 24
 RATE_LIMIT_DELAY = 0.1
 DB_FILE = "bot_database.db"
 
@@ -60,15 +65,24 @@ vk_group = None
 vk_user = None
 vk_user_session = None
 
-user_activity = {}
-activity_lock = threading.Lock()
-
 user_name_cache = {}
 user_name_cache_lock = threading.Lock()
 USER_NAME_CACHE_TTL = 3600
 
 pending_deletions = []
 deletions_lock = threading.Lock()
+
+# Защита от дублей по event_id
+processed_events = set()
+processed_events_lock = threading.Lock()
+
+# Защита от дублей по peer_id + conversation_message_id
+processed_messages = set()
+processed_messages_lock = threading.Lock()
+
+# Исключения: (user_id, link) -> добавлено
+skip_likes = {}
+skip_likes_lock = threading.Lock()
 
 VK_API_VERSION = "5.131"
 
@@ -116,6 +130,78 @@ def get_mention(user_id: int) -> str:
     return f"[id{user_id}|пользователь]"
 
 
+def get_user_id_by_link(link: str) -> Optional[int]:
+    global vk_user
+    if vk_user is None:
+        return None
+    
+    match = re.search(r'(?:https?://)?(?:m\.)?vk\.(?:com|ru)/([a-zA-Z0-9_.]+)', link)
+    if not match:
+        return None
+    
+    username = match.group(1)
+    
+    if username.lower() in ('wall', 'photo', 'video', 'clip', 'audio', 'topic',
+                            'market', 'album', 'poll', 'note', 'doc', 'feed',
+                            'im', 'friends', 'groups', 'videos', 'audios', 'photos'):
+        return None
+    
+    if username.startswith('id') and username[2:].isdigit():
+        return int(username[2:])
+    
+    try:
+        rate_limit()
+        response = vk_user.users.get(user_ids=[username])
+        if isinstance(response, list) and len(response) > 0:
+            return response[0].get('id')
+    except Exception as e:
+        print(f"⚠️ Ошибка получения ID: {e}", flush=True)
+        return None
+    
+    return None
+
+
+def add_skip_like(user_id: int, link: str):
+    global skip_likes
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO skip_likes (user_id, link, added_at)
+            VALUES (?, ?, ?)
+        ''', (user_id, link, datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+        
+        with skip_likes_lock:
+            skip_likes[(user_id, link)] = datetime.now()
+        print(f"✅ Исключение добавлено: user={user_id}, link={link}", flush=True)
+    except Exception as e:
+        print(f"⚠️ Ошибка добавления исключения: {e}", flush=True)
+
+
+def remove_skip_like(user_id: int, link: str):
+    global skip_likes
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM skip_likes WHERE user_id = ? AND link = ?',
+                      (user_id, link))
+        conn.commit()
+        conn.close()
+        
+        with skip_likes_lock:
+            skip_likes.pop((user_id, link), None)
+        print(f"🗑️ Исключение удалено: user={user_id}, link={link}", flush=True)
+    except Exception as e:
+        print(f"⚠️ Ошибка удаления исключения: {e}", flush=True)
+
+
+def is_skip_like(user_id: int, link: str) -> bool:
+    with skip_likes_lock:
+        return (user_id, link) in skip_likes
+
+
 def init_database():
     try:
         conn = sqlite3.connect(DB_FILE, check_same_thread=False)
@@ -138,18 +224,20 @@ def init_database():
             )
         ''')
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS user_activity (
-                user_id INTEGER PRIMARY KEY,
-                last_post_time TEXT,
-                post_count INTEGER DEFAULT 0
-            )
-        ''')
-        cursor.execute('''
             CREATE TABLE IF NOT EXISTS bot_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 peer_id INTEGER NOT NULL,
                 conv_message_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS skip_likes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                link TEXT NOT NULL,
+                added_at TEXT NOT NULL,
+                UNIQUE(user_id, link)
             )
         ''')
         conn.commit()
@@ -161,7 +249,7 @@ def init_database():
 
 
 def load_data():
-    global queue, vip_links, user_activity, pending_deletions
+    global queue, vip_links, pending_deletions, skip_likes
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
@@ -179,13 +267,6 @@ def load_data():
             if expires_at > now:
                 vip_links.append({'link': row[0], 'added_by': row[1], 'expires_at': expires_at})
         
-        cursor.execute('SELECT user_id, last_post_time, post_count FROM user_activity')
-        for row in cursor.fetchall():
-            user_activity[row[0]] = {
-                'last_post_time': datetime.fromisoformat(row[1]) if row[1] else None,
-                'post_count': row[2]
-            }
-        
         cursor.execute('SELECT peer_id, conv_message_id, created_at FROM bot_messages')
         for row in cursor.fetchall():
             pending_deletions.append({
@@ -194,8 +275,13 @@ def load_data():
                 'created_at': datetime.fromisoformat(row[2])
             })
         
+        cursor.execute('SELECT user_id, link, added_at FROM skip_likes')
+        skip_likes = {}
+        for row in cursor.fetchall():
+            skip_likes[(row[0], row[1])] = datetime.fromisoformat(row[2])
+        
         conn.close()
-        print(f"📂 Загружено: {len(queue)} ссылок, {len(vip_links)} VIP, {len(pending_deletions)} на удаление")
+        print(f"📂 Загружено: {len(queue)} ссылок, {len(vip_links)} VIP, {len(pending_deletions)} на удаление, {len(skip_likes)} исключений")
     except Exception as e:
         print(f"⚠️ Ошибка загрузки: {e}")
     sys.stdout.flush()
@@ -222,23 +308,6 @@ def remove_bot_message(conv_message_id: int):
         conn.close()
     except Exception as e:
         print(f"⚠️ Ошибка удаления из БД: {e}")
-
-
-def save_user_activity(user_id: int):
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO user_activity (user_id, last_post_time, post_count)
-            VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                last_post_time = excluded.last_post_time,
-                post_count = excluded.post_count
-        ''', (user_id, datetime.now().isoformat(), user_activity.get(user_id, {}).get('post_count', 0) + 1))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"⚠️ Ошибка сохранения активности: {e}")
 
 
 def save_queue():
@@ -422,6 +491,12 @@ def check_likes_batch(user_id: int, links: list) -> dict:
     single_links = []
     
     for link in links:
+        # Пропускаем ссылки, для которых есть исключение
+        if is_skip_like(user_id, link):
+            print(f"   ⏭️ Пропуск (исключение) {link}", flush=True)
+            results[link] = True
+            continue
+        
         ctype, oid, iid = get_content_type(link)
         if not ctype or oid == 0 or iid == 0:
             results[link] = True
@@ -613,63 +688,52 @@ def cleanup_worker():
             time.sleep(5)
 
 
-def get_inactive_users(peer_id: int) -> str:
-    global user_activity
-    now = datetime.now()
-    inactive = []
-    with activity_lock:
-        for user_id, data in user_activity.items():
-            if data.get('last_post_time'):
-                last_post = data['last_post_time']
-                days_inactive = (now - last_post).days
-                if days_inactive > 10:
-                    inactive.append((user_id, days_inactive))
-            else:
-                inactive.append((user_id, 999))
-    if not inactive:
-        return "✅ Все участники активны!"
-    text = "📋 Неактивные участники (более 10 дней без публикаций):\n\n"
-    for user_id, days in inactive:
-        try:
-            rate_limit()
-            user_info = vk_user.users.get(user_ids=[user_id])[0]
-            name = f"{user_info['first_name']} {user_info['last_name']}"
-            text += f"👤 {name} (ID: {user_id}) — {days} дней\n"
-        except:
-            text += f"👤 ID: {user_id} — {days} дней\n"
-    return text
-
-
 def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) -> bool:
-    global vip_links, queue
+    global vip_links, queue, skip_likes
     text_lower = text.lower().strip()
     if not is_owner(user_id):
         if message_id:
             delete_message_by_conv_id(peer_id, message_id)
         send_message(peer_id, "❌ Только владелец чата может использовать команды!")
         return True
-    if message_id:
+    if message_id and not is_owner(user_id):
         delete_message_by_conv_id(peer_id, message_id)
     cleanup_expired_vip()
     
     if text_lower.startswith('!vip '):
-        try:
-            vk_link = extract_vk_link(text.split()[1])
-        except IndexError:
-            send_message(peer_id, "⚠️ Использование: !vip [ссылка]")
+        parts = text.split()
+        if len(parts) < 2:
+            send_message(peer_id, "⚠️ Использование: !vip [ссылка] [24|48|72]\n\nПример: !vip wall-123_456 48\n(срок необязателен, по умолчанию 24 часа)")
             return True
-        if vk_link:
-            with vip_links_lock:
-                for vip in vip_links:
-                    if vip['link'] == vk_link:
-                        send_message(peer_id, f"⚠️ Ссылка уже в VIP!")
-                        return True
-                vip_links.append({'link': vk_link, 'added_by': user_id, 'expires_at': datetime.now() + timedelta(hours=VIP_DURATION_HOURS)})
-                save_vip_links()
-                reload_vip_links()
-            send_message(peer_id, f"⭐ VIP-ссылка добавлена на 24 часа!\n🔗 {make_clickable_link(vk_link)}")
-        else:
+
+        vk_link = extract_vk_link(parts[1])
+        if not vk_link:
             send_message(peer_id, "⚠️ Не удалось распознать ссылку!")
+            return True
+
+        # Срок: второй аргумент, если есть; иначе — по умолчанию
+        duration_hours = DEFAULT_VIP_DURATION
+        if len(parts) >= 3:
+            duration_arg = parts[2].strip()
+            if duration_arg in VIP_DURATIONS:
+                duration_hours = VIP_DURATIONS[duration_arg]
+            else:
+                send_message(peer_id, f"⚠️ Неверный срок: {duration_arg}\nДоступные варианты: 24, 48, 72")
+                return True
+
+        with vip_links_lock:
+            for vip in vip_links:
+                if vip['link'] == vk_link:
+                    send_message(peer_id, f"⚠️ Ссылка уже в VIP!")
+                    return True
+            vip_links.append({
+                'link': vk_link,
+                'added_by': user_id,
+                'expires_at': datetime.now() + timedelta(hours=duration_hours)
+            })
+            save_vip_links()
+            reload_vip_links()
+        send_message(peer_id, f"⭐ VIP-ссылка добавлена на {duration_hours} ч!\n🔗 {make_clickable_link(vk_link)}")
         return True
     
     if text_lower.startswith('!delvip'):
@@ -705,11 +769,6 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) 
                 hours = int(remaining.total_seconds() // 3600)
                 result += f"🔗 {make_clickable_link(vip['link'])}\n⏳ Осталось: {hours}ч\n\n"
             send_message(peer_id, result)
-        return True
-    
-    if text_lower == '!inactive':
-        inactive_text = get_inactive_users(peer_id)
-        send_message(peer_id, inactive_text)
         return True
     
     if text_lower.startswith('!delqueue'):
@@ -761,6 +820,62 @@ def handle_vip_commands(text: str, user_id: int, peer_id: int, message_id: int) 
                 result += f"{i}. 🔗 {make_clickable_link(item['link'])}\n"
             send_message(peer_id, result)
         return True
+    
+    # ===== КОМАНДА !skip =====
+    if text_lower.startswith('!skip '):
+        parts = text.split()
+        if len(parts) < 3:
+            send_message(peer_id, "⚠️ Использование: !skip [ссылка на участника] [ссылка на контент]\n\nПример: !skip vk.com/id123456789 wall-123_456")
+            return True
+        user_link = parts[1]
+        content_link = parts[2]
+        target_user_id = get_user_id_by_link(user_link)
+        if not target_user_id:
+            send_message(peer_id, "❌ Не удалось найти пользователя по ссылке!")
+            return True
+        vk_link = extract_vk_link(content_link)
+        if not vk_link:
+            send_message(peer_id, "❌ Не удалось распознать ссылку на контент!")
+            return True
+        add_skip_like(target_user_id, vk_link)
+        user_mention = get_mention(target_user_id)
+        send_message(peer_id, f"✅ Исключение добавлено!\n\n👤 Участник: {user_mention}\n🔗 Ссылка: {make_clickable_link(vk_link)}\n\nТеперь этот участник может пропустить лайк на эту ссылку.")
+        return True
+    
+    # ===== КОМАНДА !unskip =====
+    if text_lower.startswith('!unskip '):
+        parts = text.split()
+        if len(parts) < 3:
+            send_message(peer_id, "⚠️ Использование: !unskip [ссылка на участника] [ссылка на контент]")
+            return True
+        user_link = parts[1]
+        content_link = parts[2]
+        target_user_id = get_user_id_by_link(user_link)
+        if not target_user_id:
+            send_message(peer_id, "❌ Не удалось найти пользователя по ссылке!")
+            return True
+        vk_link = extract_vk_link(content_link)
+        if not vk_link:
+            send_message(peer_id, "❌ Не удалось распознать ссылку на контент!")
+            return True
+        remove_skip_like(target_user_id, vk_link)
+        user_mention = get_mention(target_user_id)
+        send_message(peer_id, f"✅ Исключение удалено!\n\n👤 Участник: {user_mention}\n🔗 Ссылка: {make_clickable_link(vk_link)}\n\nТеперь участник снова проверяется на лайк.")
+        return True
+    
+    # ===== КОМАНДА !skip_list =====
+    if text_lower == '!skip_list':
+        with skip_likes_lock:
+            if not skip_likes:
+                send_message(peer_id, "📭 Исключений нет")
+                return True
+            result = "📋 Активные исключения (лайки):\n\n"
+            for (uid, link) in skip_likes.keys():
+                user_mention = get_mention(uid)
+                result += f"👤 {user_mention} → 🔗 {make_clickable_link(link)}\n"
+            send_message(peer_id, result)
+        return True
+    
     return False
 
 
@@ -772,7 +887,7 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
         return
     
     text_lower = text.lower().strip()
-    command_prefixes = ['!vip', '!delvip', '!inactive', '!delqueue', '!clearqueue', '!queue_list']
+    command_prefixes = ['!vip', '!delvip', '!delqueue', '!clearqueue', '!queue_list', '!skip', '!unskip', '!skip_list']
     is_command = any(text_lower.startswith(cmd) for cmd in command_prefixes)
     if is_command:
         handle_vip_commands(text, user_id, peer_id, message_id)
@@ -868,13 +983,6 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             queue.pop(0)
         save_queue()
     
-    with activity_lock:
-        user_activity[user_id] = {
-            'last_post_time': datetime.now(),
-            'post_count': user_activity.get(user_id, {}).get('post_count', 0) + 1
-        }
-    save_user_activity(user_id)
-    
     text = f"{mention}, ✅ ваша ссылка опубликована!\n🔗 {make_clickable_link(vk_link)}\n📊 В очереди: {len(queue)}\n\n"
     text += "⏳ Ждем Вас через 5 ссылок!\n\n"
     text += "💎 По вопросам и для покупки VIP — пишите: https://vk.com/id1121274330"
@@ -891,6 +999,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            self.wfile.flush()
         except Exception as e:
             print(f"❌ Ошибка do_GET: {e}", flush=True)
     
@@ -908,10 +1017,28 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-Length', str(len(rb)))
                 self.end_headers()
                 self.wfile.write(rb)
+                self.wfile.flush()
+                return
             
             print(f"📥 Событие: {event_type}", flush=True)
             
             if event_type == 'message_new':
+                # ===== ЗАЩИТА ОТ ДУБЛЕЙ ПО event_id =====
+                event_id = data.get('event_id', '')
+                if event_id:
+                    with processed_events_lock:
+                        if event_id in processed_events:
+                            print(f"⏭️ Дубль события {event_id}, пропускаем", flush=True)
+                            rb = b'ok'
+                            self.send_response(200)
+                            self.send_header('Content-Type', 'text/plain')
+                            self.send_header('Content-Length', str(len(rb)))
+                            self.end_headers()
+                            self.wfile.write(rb)
+                            self.wfile.flush()
+                            return
+                        processed_events.add(event_id)
+                
                 msg = data.get('object', {}).get('message', {})
                 action = msg.get('action', {})
                 if action and action.get('type') in ['chat_invite_user', 'chat_invite_user_by_link']:
@@ -921,8 +1048,37 @@ class CallbackHandler(BaseHTTPRequestHandler):
                     self.send_header('Content-Length', str(len(rb)))
                     self.end_headers()
                     self.wfile.write(rb)
+                    self.wfile.flush()
                     return
-                event_id = data.get('event_id', '')
+                
+                # ===== ЗАЩИТА ОТ ДУБЛЕЙ ПО peer_id + conversation_message_id =====
+                peer_id = msg.get('peer_id', 0)
+                cmid = msg.get('conversation_message_id', 0)
+                if peer_id and cmid:
+                    msg_key = (peer_id, cmid)
+                    with processed_messages_lock:
+                        if msg_key in processed_messages:
+                            print(f"⏭️ Дубль сообщения {msg_key}, пропускаем", flush=True)
+                            rb = b'ok'
+                            self.send_response(200)
+                            self.send_header('Content-Type', 'text/plain')
+                            self.send_header('Content-Length', str(len(rb)))
+                            self.end_headers()
+                            self.wfile.write(rb)
+                            self.wfile.flush()
+                            return
+                        processed_messages.add(msg_key)
+                
+                # ===== СНАЧАЛА ОТВЕЧАЕМ ok И СБРАСЫВАЕМ БУФЕР =====
+                rb = b'ok'
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain')
+                self.send_header('Content-Length', str(len(rb)))
+                self.end_headers()
+                self.wfile.write(rb)
+                self.wfile.flush()
+                
+                # ===== ПОТОМ ЗАПУСКАЕМ ОБРАБОТКУ =====
                 thread = threading.Thread(target=process_message, args=(
                     msg.get('peer_id', 0),
                     msg.get('from_id', 0),
@@ -931,12 +1087,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
                     event_id
                 ), daemon=True)
                 thread.start()
-                rb = b'ok'
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain')
-                self.send_header('Content-Length', str(len(rb)))
-                self.end_headers()
-                self.wfile.write(rb)
+                return
             else:
                 rb = b'ok'
                 self.send_response(200)
@@ -944,6 +1095,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-Length', str(len(rb)))
                 self.end_headers()
                 self.wfile.write(rb)
+                self.wfile.flush()
         except Exception as e:
             print(f"❌ Ошибка do_POST: {e}", flush=True)
             try:
@@ -953,11 +1105,17 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-Length', str(len(rb)))
                 self.end_headers()
                 self.wfile.write(rb)
+                self.wfile.flush()
             except:
                 pass
     
     def log_message(self, fmt, *args):
         pass
+
+
+# ✅ Класс сервера с allow_reuse_address для корректного перезапуска
+class CallbackServer(HTTPServer):
+    allow_reuse_address = True
 
 
 if __name__ == "__main__":
@@ -981,7 +1139,8 @@ if __name__ == "__main__":
     print(f"📡 Порт: {PORT}", flush=True)
     sys.stdout.flush()
     
-    server = HTTPServer(('0.0.0.0', PORT), CallbackHandler)
+    # ✅ Теперь CallbackServer определён выше — ошибки NameError не будет
+    server = CallbackServer(('0.0.0.0', PORT), CallbackHandler)
     print(f"✅ Сервер запущен на 0.0.0.0:{PORT}", flush=True)
     sys.stdout.flush()
     server.serve_forever()
