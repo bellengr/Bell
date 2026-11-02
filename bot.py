@@ -947,8 +947,8 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             if message_id:
                 delete_message_by_conv_id(peer_id, message_id)
             text = f"{mention}, ⭐ обязательно проставь лайки на VIP ссылки:\n\n"
-            for link in missing_vip:
-                text += f"⭐ {make_clickable_link(link)}\n"
+            for i, link in enumerate(missing_vip, 1):
+                text += f"{i}. ⭐ {make_clickable_link(link)}\n"
             text += f"\n{'─' * 30}\n"
             text += "⏳ На выполнение даётся 5 минут!\n"
             text += "✅ После того, как поставишь лайки, отправь свою ссылку снова.\n\n"
@@ -968,8 +968,8 @@ def process_message(peer_id: int, user_id: int, text: str, message_id: int, even
             if message_id:
                 delete_message_by_conv_id(peer_id, message_id)
             text = f"{mention}, 📋 обязательно проставь лайки на предыдущие 10 ссылок:\n\n"
-            for link in missing_regular:
-                text += f"▫️ {make_clickable_link(link)}\n"
+            for i, link in enumerate(missing_regular, 1):
+                text += f"{i}. ▫️ {make_clickable_link(link)}\n"
             text += f"\n{'─' * 30}\n"
             text += "⏳ На выполнение даётся 5 минут!\n"
             text += "✅ После того, как поставишь лайки, отправь свою ссылку снова.\n\n"
